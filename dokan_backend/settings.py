@@ -1,6 +1,11 @@
 import os
 from pathlib import Path
-import dj_database_url
+
+try:
+    import dj_database_url
+    HAS_DJ_DB_URL = True
+except ImportError:
+    HAS_DJ_DB_URL = False
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -56,13 +61,21 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'dokan_backend.wsgi.application'
 
-# Database configuration: Uses DATABASE_URL if available (Railway Postgres), else SQLite
-DATABASES = {
-    'default': dj_database_url.config(
-        default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
-        conn_max_age=600,
-    )
-}
+# Database configuration: Uses DATABASE_URL on Railway (Postgres), else SQLite
+if HAS_DJ_DB_URL and ('DATABASE_URL' in os.environ or os.environ.get('RAILWAY_ENVIRONMENT')):
+    DATABASES = {
+        'default': dj_database_url.config(
+            default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
+            conn_max_age=600,
+        )
+    }
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
