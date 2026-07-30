@@ -160,26 +160,52 @@ class DashboardStatsView(APIView):
         # Sales aggregates
         sales_qs = Transaction.objects.filter(transaction_type='sale')
         total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        sales_paid = sales_qs.aggregate(total=Sum('paid_amount'))['total'] or 0
         total_dues = sales_qs.aggregate(total=Sum('due_amount'))['total'] or 0
         monthly_sales = sales_qs.filter(created_at__gte=first_day_of_month).aggregate(total=Sum('total_amount'))['total'] or 0
 
         # Purchase aggregates
         purchases_qs = Transaction.objects.filter(transaction_type='purchase')
         total_purchases = purchases_qs.aggregate(total=Sum('total_amount'))['total'] or 0
+        purchases_paid = purchases_qs.aggregate(total=Sum('paid_amount'))['total'] or 0
         monthly_purchases = purchases_qs.filter(created_at__gte=first_day_of_month).aggregate(total=Sum('total_amount'))['total'] or 0
 
         # Expense aggregates
         total_expenses = Expense.objects.aggregate(total=Sum('amount'))['total'] or 0
         monthly_expenses = Expense.objects.filter(date__gte=first_day_of_month.date()).aggregate(total=Sum('amount'))['total'] or 0
 
-        # Cash & Bank Balance
+        # Cash & Bank Balance (Real calculation)
         banks_total = Bank.objects.aggregate(total=Sum('balance'))['total'] or 0
-        total_cash = max(0, float(total_sales) - float(total_purchases) - float(total_expenses) + 285400)
-        total_bank = float(banks_total) if banks_total > 0 else 350000
+        total_cash = max(0, float(sales_paid) - float(purchases_paid) - float(total_expenses))
+        total_bank = float(banks_total)
 
         # Inventory Low Stock
         low_stock_count = Product.objects.filter(stock__lte=F('min_stock')).count()
         total_products_count = Product.objects.count()
+
+        # Last 7 Days Sales & Purchase Trend
+        weekly_data = []
+        bn_days = {0: 'সোম', 1: 'মঙ্গল', 2: 'বুধ', 3: 'বৃহস্পতি', 4: 'শুক্র', 5: 'শনি', 6: 'রবি'}
+        today = now.date()
+        for i in range(6, -1, -1):
+            day_date = today - timedelta(days=i)
+            day_name = bn_days[day_date.weekday()]
+            
+            day_sales = Transaction.objects.filter(
+                transaction_type='sale',
+                created_at__date=day_date
+            ).aggregate(total=Sum('total_amount'))['total'] or 0
+
+            day_purchases = Transaction.objects.filter(
+                transaction_type='purchase',
+                created_at__date=day_date
+            ).aggregate(total=Sum('total_amount'))['total'] or 0
+
+            weekly_data.append({
+                'name': day_name,
+                'বিক্রয়': float(day_sales),
+                'ক্রয়': float(day_purchases)
+            })
 
         # Recent Transactions
         recent_txs = Transaction.objects.all().order_by('-created_at')[:10]
@@ -197,5 +223,7 @@ class DashboardStatsView(APIView):
             'totalBank': total_bank,
             'lowStockCount': low_stock_count,
             'totalProductsCount': total_products_count,
+            'weeklyData': weekly_data,
             'recentTransactions': recent_tx_serializer.data,
         })
+
