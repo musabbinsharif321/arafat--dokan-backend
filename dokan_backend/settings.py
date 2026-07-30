@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
 
+import importlib
+
 try:
-    import dj_database_url
+    dj_database_url = importlib.import_module('dj_database_url')
     HAS_DJ_DB_URL = True
-except ImportError:
+except Exception:
     HAS_DJ_DB_URL = False
 
 BASE_DIR = Path(__file__).resolve().parent.parent
