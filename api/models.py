@@ -49,7 +49,7 @@ class Party(models.Model):
     total_due = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     total_purchases = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     total_sales = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    joined_date = models.DateField(default=timezone.now)
+    joined_date = models.DateField(default=timezone.localdate)
     note = models.TextField(blank=True, null=True)
     photo_url = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -183,7 +183,7 @@ class Expense(models.Model):
     category_name = models.CharField(max_length=100, default='সাধারণ খরচ')
     title = models.CharField(max_length=255)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    date = models.DateField(default=timezone.now)
+    date = models.DateField(default=timezone.localdate)
     payment_method = models.CharField(max_length=50, default='ক্যাশ')
     bank_account = models.ForeignKey(Bank, on_delete=models.SET_NULL, null=True, blank=True)
     reference_no = models.CharField(max_length=100, blank=True, null=True)
@@ -192,3 +192,20 @@ class Expense(models.Model):
 
     def __str__(self):
         return f"{self.title} - {self.amount}"
+
+class Hawlat(models.Model):
+    person_name = models.CharField(max_length=255, default='সাধারণ হাওলাত')
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    note = models.TextField(blank=True, null=True)
+    date = models.DateField(default=timezone.localdate)
+    is_settled = models.BooleanField(default=False)
+    settled_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = 'Hawlats'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.person_name} - {self.amount}"
+

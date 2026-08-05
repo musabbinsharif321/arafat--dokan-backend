@@ -8,7 +8,8 @@ from .models import (
     Transaction,
     TransactionItem,
     ExpenseCategory,
-    Expense
+    Expense,
+    Hawlat
 )
 
 class ShopSettingsSerializer(serializers.ModelSerializer):
@@ -266,8 +267,12 @@ class TransactionSerializer(serializers.ModelSerializer):
                 party.total_due += transaction.due_amount
                 party.total_purchases += transaction.total_amount
                 party.save()
+            elif transaction.transaction_type == 'sale_return':
+                due_reduction = max(0.0, float(transaction.total_amount) - float(transaction.paid_amount))
+                party.total_due = max(0.0, float(party.total_due) - due_reduction)
+                party.save()
             elif transaction.transaction_type in ['payment_in', 'payment_out']:
-                party.total_due = max(0, party.total_due - transaction.paid_amount)
+                party.total_due = max(0.0, float(party.total_due) - float(transaction.paid_amount))
                 party.save()
 
         return transaction
@@ -301,3 +306,11 @@ class ExpenseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Expense
         fields = '__all__'
+
+class HawlatSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Hawlat
+        fields = '__all__'
+

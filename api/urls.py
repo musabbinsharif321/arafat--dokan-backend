@@ -9,6 +9,7 @@ from .views import (
     TransactionViewSet,
     ExpenseCategoryViewSet,
     ExpenseViewSet,
+    HawlatViewSet,
     DashboardStatsView
 )
 
@@ -21,6 +22,7 @@ router.register(r'banks', BankViewSet, basename='bank')
 router.register(r'transactions', TransactionViewSet, basename='transaction')
 router.register(r'expense-categories', ExpenseCategoryViewSet, basename='expense-category')
 router.register(r'expenses', ExpenseViewSet, basename='expense')
+router.register(r'hawlats', HawlatViewSet, basename='hawlat')
 
 urlpatterns = [
     path('', include(router.urls)),

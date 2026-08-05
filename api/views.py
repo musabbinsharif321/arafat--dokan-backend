@@ -14,7 +14,8 @@ from .models import (
     Transaction,
     TransactionItem,
     ExpenseCategory,
-    Expense
+    Expense,
+    Hawlat
 )
 from .serializers import (
     ShopSettingsSerializer,
@@ -24,7 +25,8 @@ from .serializers import (
     BankSerializer,
     TransactionSerializer,
     ExpenseCategorySerializer,
-    ExpenseSerializer
+    ExpenseSerializer,
+    HawlatSerializer
 )
 
 class ShopSettingsViewSet(viewsets.ModelViewSet):
@@ -226,4 +228,9 @@ class DashboardStatsView(APIView):
             'weeklyData': weekly_data,
             'recentTransactions': recent_tx_serializer.data,
         })
+
+class HawlatViewSet(viewsets.ModelViewSet):
+    queryset = Hawlat.objects.all().order_by('-created_at')
+    serializer_class = HawlatSerializer
+
 
