@@ -1,3 +1,4 @@
+from decimal import Decimal
 from rest_framework import serializers
 from .models import (
     ShopSettings,
@@ -44,10 +45,11 @@ class BankSerializer(serializers.ModelSerializer):
 
 class TransactionItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
+    sell_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
 
     class Meta:
         model = TransactionItem
-        fields = ['id', 'product', 'product_name', 'quantity', 'price', 'unit', 'total']
+        fields = ['id', 'product', 'product_name', 'quantity', 'price', 'sell_price', 'unit', 'total']
 
 import re
 
@@ -63,7 +65,7 @@ def normalize_bn_en_digits(text):
         res = res.replace(b, e)
     return res
 
-def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None):
+def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None, sell_price=None):
     from .models import Product, Category
     if not item_name or not item_name.strip():
         return None
@@ -177,6 +179,8 @@ def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None
     if not cat_obj:
         cat_obj = Category.objects.create(name=category_head)
 
+    sp = float(sell_price) if (sell_price and float(sell_price) > 0) else round((float(price or 0) * 1.1), 2)
+
     new_prod = Product.objects.create(
         name=cleaned_name,
         category=cat_obj,
@@ -184,7 +188,7 @@ def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None
         brand=brand_param or '',
         unit=unit or ('কেজি' if category_head == 'রড' else 'বস্তা' if category_head == 'সিমেন্ট' else 'পিস'),
         purchase_price=price or 0.00,
-        sell_price=round((float(price or 0) * 1.1), 2),
+        sell_price=sp,
         stock=0.00
     )
     return new_prod
@@ -214,8 +218,26 @@ class TransactionSerializer(serializers.ModelSerializer):
             validated_data['party_phone'] = party.phone
 
         transaction = Transaction.objects.create(**validated_data)
-        
+
+        # Calculate per-unit extra charges (shipping & labor) from transaction notes
+        extra_per_unit = 0.0
+        if transaction.notes and transaction.notes.strip().startswith('{'):
+            try:
+                import json
+                first_line = transaction.notes.split('\n')[0]
+                meta = json.loads(first_line)
+                ship = float(meta.get('shippingCost') or 0.0)
+                lab = float(meta.get('laborCost') or 0.0)
+                tot_extra = ship + lab
+                tot_qty = sum(float(it.get('quantity') or 0) for it in items_data)
+                if tot_qty > 0 and tot_extra > 0:
+                    extra_per_unit = tot_extra / tot_qty
+            except Exception:
+                pass
+
         for item_data in items_data:
+            sell_price_input = item_data.pop('sell_price', None)
+
             t_item = TransactionItem.objects.create(transaction=transaction, **item_data)
             prod = t_item.product
 
@@ -223,7 +245,8 @@ class TransactionSerializer(serializers.ModelSerializer):
                 prod = find_or_create_product_for_purchase(
                     item_name=t_item.product_name,
                     unit=t_item.unit,
-                    price=t_item.price
+                    price=t_item.price,
+                    sell_price=sell_price_input
                 )
                 if prod:
                     t_item.product = prod
@@ -234,14 +257,19 @@ class TransactionSerializer(serializers.ModelSerializer):
                 old_price = float(prod.purchase_price or 0)
                 qty = float(t_item.quantity or 0)
                 unit_price = float(t_item.price or 0)
+                landed_unit_price = unit_price + extra_per_unit
 
                 if transaction.transaction_type == 'purchase':
-                    # Weighted Average Purchase Price Calculation (ক্রয় মূল্য সমন্বয়)
+                    # Weighted Average Purchase Price Calculation (গাড়ি ভাড়া ও লেবার খরচসহ Landed Cost দিয়ে স্টক কেনা দাম আপডেট)
                     if (old_stock + qty) > 0 and old_stock > 0 and old_price > 0:
-                        weighted_price = ((old_stock * old_price) + (qty * unit_price)) / (old_stock + qty)
+                        weighted_price = ((old_stock * old_price) + (qty * landed_unit_price)) / (old_stock + qty)
                         prod.purchase_price = round(weighted_price, 2)
-                    elif unit_price > 0:
-                        prod.purchase_price = round(unit_price, 2)
+                    elif landed_unit_price > 0:
+                        prod.purchase_price = round(landed_unit_price, 2)
+
+                    # Update selling price if specified
+                    if sell_price_input is not None and float(sell_price_input) > 0:
+                        prod.sell_price = round(float(sell_price_input), 2)
 
                     prod.stock = old_stock + qty
                     prod.save()
@@ -264,7 +292,17 @@ class TransactionSerializer(serializers.ModelSerializer):
                 party.total_sales += transaction.total_amount
                 party.save()
             elif transaction.transaction_type == 'purchase':
-                party.total_due += transaction.due_amount
+                supplier_due = transaction.due_amount
+                if transaction.notes and transaction.notes.strip().startswith('{'):
+                    try:
+                        import json
+                        first_line = transaction.notes.split('\n')[0]
+                        meta = json.loads(first_line)
+                        if 'supplierDue' in meta and meta['supplierDue'] is not None:
+                            supplier_due = Decimal(str(meta['supplierDue']))
+                    except Exception:
+                        pass
+                party.total_due += supplier_due
                 party.total_purchases += transaction.total_amount
                 party.save()
             elif transaction.transaction_type == 'sale_return':
