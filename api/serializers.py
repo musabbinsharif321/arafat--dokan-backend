@@ -43,9 +43,23 @@ class BankSerializer(serializers.ModelSerializer):
         model = Bank
         fields = '__all__'
 
+class RoundedDecimalField(serializers.DecimalField):
+    def to_internal_value(self, data):
+        if data is None or data == '':
+            return None
+        try:
+            val = Decimal(str(data))
+            rounded_val = val.quantize(Decimal('0.01'))
+            return super().to_internal_value(rounded_val)
+        except Exception:
+            return super().to_internal_value(data)
+
 class TransactionItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
-    sell_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    quantity = RoundedDecimalField(max_digits=10, decimal_places=2, required=False)
+    price = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
+    total = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
+    sell_price = RoundedDecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
 
     class Meta:
         model = TransactionItem
@@ -194,9 +208,17 @@ def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None
     return new_prod
 
 
+from .services import recalculate_product_stock_and_cost
+
 class TransactionSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
     invoice_no = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    subtotal = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
+    discount = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
+    tax = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
+    total_amount = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
+    paid_amount = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
+    due_amount = RoundedDecimalField(max_digits=12, decimal_places=2, required=False)
     items = TransactionItemSerializer(many=True, required=False)
 
     class Meta:
@@ -219,78 +241,33 @@ class TransactionSerializer(serializers.ModelSerializer):
 
         transaction = Transaction.objects.create(**validated_data)
 
-        # Calculate per-unit extra charges (shipping & labor) from transaction notes
-        extra_per_unit = 0.0
-        if transaction.notes and transaction.notes.strip().startswith('{'):
-            try:
-                import json
-                first_line = transaction.notes.split('\n')[0]
-                meta = json.loads(first_line)
-                ship = float(meta.get('shippingCost') or 0.0)
-                lab = float(meta.get('laborCost') or 0.0)
-                tot_extra = ship + lab
-                tot_qty = sum(float(it.get('quantity') or 0) for it in items_data)
-                if tot_qty > 0 and tot_extra > 0:
-                    extra_per_unit = tot_extra / tot_qty
-            except Exception:
-                pass
+        affected_product_ids = set()
 
         for item_data in items_data:
             sell_price_input = item_data.pop('sell_price', None)
+            item_data.pop('cost_price', None)
 
             t_item = TransactionItem.objects.create(transaction=transaction, **item_data)
             prod = t_item.product
-            if prod and t_item.product_name:
-                import re
-                p_norm = re.sub(r'(\b\S+\b)(?:\s+\1)+', r'\1', prod.name.strip().lower())
-                item_norm = re.sub(r'(\b\S+\b)(?:\s+\1)+', r'\1', t_item.product_name.strip().lower())
-                if p_norm != item_norm and not (p_norm in item_norm or item_norm in p_norm):
-                    prod = None
-
             if not prod and t_item.product_name:
-                prod = find_or_create_product_for_purchase(
-                    item_name=t_item.product_name,
-                    unit=t_item.unit,
-                    price=t_item.price,
-                    sell_price=sell_price_input
-                )
+                prod = Product.objects.filter(name__iexact=t_item.product_name.strip()).first()
+                if not prod:
+                    prod = find_or_create_product_for_purchase(
+                        item_name=t_item.product_name,
+                        unit=t_item.unit,
+                        price=t_item.price,
+                        sell_price=sell_price_input
+                    )
                 if prod:
                     t_item.product = prod
                     t_item.save(update_fields=['product'])
 
             if prod:
-                old_stock = float(prod.stock or 0)
-                old_price = float(prod.purchase_price or 0)
-                qty = float(t_item.quantity or 0)
-                unit_price = float(t_item.price or 0)
-                landed_unit_price = unit_price + extra_per_unit
-
-                if transaction.transaction_type == 'purchase':
-                    # Weighted Average Purchase Price Calculation (গাড়ি ভাড়া ও লেবার খরচসহ Landed Cost দিয়ে স্টক কেনা দাম আপডেট)
-                    if (old_stock + qty) > 0 and old_stock > 0 and old_price > 0:
-                        weighted_price = ((old_stock * old_price) + (qty * landed_unit_price)) / (old_stock + qty)
-                        prod.purchase_price = round(weighted_price, 2)
-                    elif landed_unit_price > 0:
-                        prod.purchase_price = round(landed_unit_price, 2)
-
-                    # Update selling price if specified
-                    if sell_price_input is not None and float(sell_price_input) > 0:
-                        prod.sell_price = round(float(sell_price_input), 2)
-
-                    prod.stock = old_stock + qty
-                    prod.save()
-
-                elif transaction.transaction_type == 'sale':
-                    prod.stock = max(0.0, old_stock - qty)
-                    prod.save()
-
-                elif transaction.transaction_type == 'sale_return':
-                    prod.stock = old_stock + qty
-                    prod.save()
-
-                elif transaction.transaction_type == 'purchase_return':
-                    prod.stock = max(0.0, old_stock - qty)
-                    prod.save()
+                affected_product_ids.add(prod.id)
+                # Update selling price if specified in purchase
+                if transaction.transaction_type == 'purchase' and sell_price_input is not None and float(sell_price_input) > 0:
+                    prod.sell_price = round(float(sell_price_input), 2)
+                    prod.save(update_fields=['sell_price'])
 
         if party:
             if transaction.transaction_type == 'sale':
@@ -311,30 +288,36 @@ class TransactionSerializer(serializers.ModelSerializer):
                 party.total_due += supplier_due
                 party.total_purchases += transaction.total_amount
                 party.save()
-            elif transaction.transaction_type == 'sale_return':
-                due_reduction = max(0.0, float(transaction.total_amount) - float(transaction.paid_amount))
-                party.total_due = max(0.0, float(party.total_due) - due_reduction)
+            elif transaction.transaction_type in ['sale_return', 'purchase_return']:
+                due_reduction = max(Decimal('0.00'), Decimal(str(transaction.total_amount)) - Decimal(str(transaction.paid_amount)))
+                party.total_due = max(Decimal('0.00'), Decimal(str(party.total_due)) - due_reduction)
                 party.save()
             elif transaction.transaction_type in ['payment_in', 'payment_out']:
-                party.total_due = max(0.0, float(party.total_due) - float(transaction.paid_amount))
+                party.total_due = max(Decimal('0.00'), Decimal(str(party.total_due)) - Decimal(str(transaction.paid_amount)))
                 party.save()
+
+        # Chronologically recalculate stock & weighted cost for all affected products
+        for pid in affected_product_ids:
+            recalculate_product_stock_and_cost(pid)
 
         return transaction
 
     def update(self, instance, validated_data):
         import json
         items_data = validated_data.pop('items', None)
-        old_party = instance.party
+        old_party = Party.objects.filter(id=instance.party_id).first() if instance.party_id else None
         old_type = instance.transaction_type
         old_total = Decimal(str(instance.total_amount or 0))
         old_due = Decimal(str(instance.due_amount or 0))
         old_paid = Decimal(str(instance.paid_amount or 0))
 
+        affected_product_ids = set(instance.items.exclude(product__isnull=True).values_list('product_id', flat=True))
+
         # 1. Revert previous transaction effects on old party
         if old_party:
             if old_type == 'sale':
-                old_party.total_due = max(Decimal('0.00'), old_party.total_due - old_due)
-                old_party.total_sales = max(Decimal('0.00'), old_party.total_sales - old_total)
+                old_party.total_due = Decimal(str(old_party.total_due)) - old_due
+                old_party.total_sales = Decimal(str(old_party.total_sales)) - old_total
                 old_party.save()
             elif old_type == 'purchase':
                 old_supplier_due = old_due
@@ -346,42 +329,19 @@ class TransactionSerializer(serializers.ModelSerializer):
                             old_supplier_due = Decimal(str(meta['supplierDue']))
                     except Exception:
                         pass
-                old_party.total_due = max(Decimal('0.00'), old_party.total_due - old_supplier_due)
-                old_party.total_purchases = max(Decimal('0.00'), old_party.total_purchases - old_total)
+                old_party.total_due = Decimal(str(old_party.total_due)) - old_supplier_due
+                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_total
                 old_party.save()
-            elif old_type == 'sale_return':
+            elif old_type in ['sale_return', 'purchase_return']:
                 due_red = max(Decimal('0.00'), old_total - old_paid)
-                old_party.total_due = old_party.total_due + due_red
+                old_party.total_due = Decimal(str(old_party.total_due)) + due_red
                 old_party.save()
             elif old_type in ['payment_in', 'payment_out']:
-                old_party.total_due = old_party.total_due + old_paid
+                old_party.total_due = Decimal(str(old_party.total_due)) + old_paid
                 old_party.save()
 
-        # 2. Revert previous items' effect on product stock if new items are supplied
+        # 2. Delete old items
         if items_data is not None:
-            for old_item in list(instance.items.all()):
-                prod = old_item.product
-                if not prod and old_item.product_name:
-                    prod = find_or_create_product_for_purchase(
-                        item_name=old_item.product_name,
-                        unit=old_item.unit,
-                        price=old_item.price
-                    )
-                if prod:
-                    old_qty = Decimal(str(old_item.quantity or 0))
-                    if old_type == 'purchase':
-                        prod.stock = max(Decimal('0.00'), prod.stock - old_qty)
-                        prod.needs_price_review = True
-                        prod.save()
-                    elif old_type == 'sale':
-                        prod.stock = prod.stock + old_qty
-                        prod.save()
-                    elif old_type == 'sale_return':
-                        prod.stock = max(Decimal('0.00'), prod.stock - old_qty)
-                        prod.save()
-                    elif old_type == 'purchase_return':
-                        prod.stock = prod.stock + old_qty
-                        prod.save()
             instance.items.all().delete()
 
         # 3. Update instance attributes
@@ -389,93 +349,65 @@ class TransactionSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
 
-        # 4. If items are provided, create new items and update stock & landed costs
+        # 4. If items are provided, create new items
         if items_data is not None:
-            extra_per_unit = 0.0
-            if instance.notes and instance.notes.strip().startswith('{'):
-                try:
-                    first_line = instance.notes.split('\n')[0]
-                    meta = json.loads(first_line)
-                    ship = float(meta.get('shippingCost') or 0.0)
-                    lab = float(meta.get('laborCost') or 0.0)
-                    tot_extra = ship + lab
-                    tot_qty = sum(float(it.get('quantity') or 0) for it in items_data)
-                    if tot_qty > 0 and tot_extra > 0:
-                        extra_per_unit = tot_extra / tot_qty
-                except Exception:
-                    pass
-
             for item_data in items_data:
                 sell_price_input = item_data.pop('sell_price', None)
+                item_data.pop('cost_price', None)
                 t_item = TransactionItem.objects.create(transaction=instance, **item_data)
                 prod = t_item.product
 
-                if prod and t_item.product_name:
-                    import re
-                    p_norm = re.sub(r'(\b\S+\b)(?:\s+\1)+', r'\1', prod.name.strip().lower())
-                    item_norm = re.sub(r'(\b\S+\b)(?:\s+\1)+', r'\1', t_item.product_name.strip().lower())
-                    if p_norm != item_norm and not (p_norm in item_norm or item_norm in p_norm):
-                        prod = None
-
                 if not prod and t_item.product_name:
-                    prod = find_or_create_product_for_purchase(
-                        item_name=t_item.product_name,
-                        unit=t_item.unit,
-                        price=t_item.price,
-                        sell_price=sell_price_input
-                    )
+                    prod = Product.objects.filter(name__iexact=t_item.product_name.strip()).first()
+                    if not prod:
+                        prod = find_or_create_product_for_purchase(
+                            item_name=t_item.product_name,
+                            unit=t_item.unit,
+                            price=t_item.price,
+                            sell_price=sell_price_input
+                        )
                     if prod:
                         t_item.product = prod
                         t_item.save(update_fields=['product'])
 
                 if prod:
-                    old_stock = float(prod.stock or 0)
-                    qty = float(t_item.quantity or 0)
-
-                    if instance.transaction_type == 'purchase':
-                        # Note: In purchase edit, stock is updated (delta added), purchase_price is kept unchanged,
-                        # and needs_price_review is flagged so the user can review/fix the price on the stock page.
-                        prod.stock = Decimal(str(old_stock + qty))
-                        prod.needs_price_review = True
-                        prod.save()
-                    elif instance.transaction_type == 'sale':
-                        prod.stock = Decimal(str(max(0.0, old_stock - qty)))
-                        prod.save()
-                    elif instance.transaction_type == 'sale_return':
-                        prod.stock = Decimal(str(old_stock + qty))
-                        prod.save()
-                    elif instance.transaction_type == 'purchase_return':
-                        prod.stock = Decimal(str(max(0.0, old_stock - qty)))
-                        prod.save()
+                    affected_product_ids.add(prod.id)
+                    if instance.transaction_type == 'purchase' and sell_price_input is not None and float(sell_price_input) > 0:
+                        prod.sell_price = round(float(sell_price_input), 2)
+                        prod.save(update_fields=['sell_price'])
 
         # 5. Apply new transaction effect on current/updated party
-        new_party = instance.party
-        if new_party:
-            new_party.refresh_from_db()
-            if instance.transaction_type == 'sale':
-                new_party.total_due += instance.due_amount
-                new_party.total_sales += instance.total_amount
-                new_party.save()
-            elif instance.transaction_type == 'purchase':
-                supplier_due = instance.due_amount
-                if instance.notes and instance.notes.strip().startswith('{'):
-                    try:
-                        first_line = instance.notes.split('\n')[0]
-                        meta = json.loads(first_line)
-                        if 'supplierDue' in meta and meta['supplierDue'] is not None:
-                            supplier_due = Decimal(str(meta['supplierDue']))
-                    except Exception:
-                        pass
-                new_party.total_due += supplier_due
-                new_party.total_purchases += instance.total_amount
-                new_party.save()
-            elif instance.transaction_type == 'sale_return':
-                due_reduction = max(Decimal('0.00'), instance.total_amount - instance.paid_amount)
-                new_party.total_due = max(Decimal('0.00'), new_party.total_due - due_reduction)
-                new_party.save()
-            elif instance.transaction_type in ['payment_in', 'payment_out']:
-                new_party.total_due = max(Decimal('0.00'), new_party.total_due - instance.paid_amount)
-                new_party.save()
+        if instance.party_id:
+            new_party = Party.objects.filter(id=instance.party_id).first()
+            if new_party:
+                if instance.transaction_type == 'sale':
+                    new_party.total_due = Decimal(str(new_party.total_due)) + Decimal(str(instance.due_amount or 0))
+                    new_party.total_sales = Decimal(str(new_party.total_sales)) + Decimal(str(instance.total_amount or 0))
+                    new_party.save()
+                elif instance.transaction_type == 'purchase':
+                    supplier_due = Decimal(str(instance.due_amount or 0))
+                    if instance.notes and instance.notes.strip().startswith('{'):
+                        try:
+                            first_line = instance.notes.split('\n')[0]
+                            meta = json.loads(first_line)
+                            if 'supplierDue' in meta and meta['supplierDue'] is not None:
+                                supplier_due = Decimal(str(meta['supplierDue']))
+                        except Exception:
+                            pass
+                    new_party.total_due = Decimal(str(new_party.total_due)) + supplier_due
+                    new_party.total_purchases = Decimal(str(new_party.total_purchases)) + Decimal(str(instance.total_amount or 0))
+                    new_party.save()
+                elif instance.transaction_type in ['sale_return', 'purchase_return']:
+                    due_reduction = max(Decimal('0.00'), Decimal(str(instance.total_amount or 0)) - Decimal(str(instance.paid_amount or 0)))
+                    new_party.total_due = Decimal(str(new_party.total_due)) - due_reduction
+                    new_party.save()
+                elif instance.transaction_type in ['payment_in', 'payment_out']:
+                    new_party.total_due = Decimal(str(new_party.total_due)) - Decimal(str(instance.paid_amount or 0))
+                    new_party.save()
+
+        # 6. Chronologically recalculate stock & weighted cost for all affected products
+        for pid in affected_product_ids:
+            recalculate_product_stock_and_cost(pid)
 
         return instance
 

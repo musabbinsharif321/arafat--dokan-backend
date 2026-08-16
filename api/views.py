@@ -67,6 +67,9 @@ class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by('name')
     serializer_class = CategorySerializer
 
+from rest_framework.decorators import action
+from .services import recalculate_product_stock_and_cost, generate_product_cost_log
+
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all().order_by('name')
     serializer_class = ProductSerializer
@@ -92,9 +95,26 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    @action(detail=False, methods=['get'], url_path='cost_logs')
+    def cost_logs(self, request):
+        product_id = request.query_params.get('product_id')
+        if product_id:
+            data = generate_product_cost_log(product_id)
+            return Response(data if data else {'error': 'পণ্য খুঁজে পাওয়া যায়নি'}, status=status.HTTP_200_OK if data else status.HTTP_404_NOT_FOUND)
+        
+        # If no product_id specified, return logs for all products with transactions
+        all_logs = []
+        for p in Product.objects.all().order_by('name'):
+            p_log = generate_product_cost_log(p)
+            if p_log and p_log['logs']:
+                all_logs.append(p_log)
+        return Response(all_logs, status=status.HTTP_200_OK)
+
 class BankViewSet(viewsets.ModelViewSet):
     queryset = Bank.objects.all().order_by('name')
     serializer_class = BankSerializer
+
+from .services import recalculate_product_stock_and_cost
 
 class TransactionViewSet(viewsets.ModelViewSet):
     queryset = Transaction.objects.all().order_by('-created_at')
@@ -125,6 +145,47 @@ class TransactionViewSet(viewsets.ModelViewSet):
             )
 
         return qs
+
+    def perform_destroy(self, instance):
+        from decimal import Decimal
+        import json
+        old_party = Party.objects.filter(id=instance.party_id).first() if instance.party_id else None
+        old_type = instance.transaction_type
+        old_total = instance.total_amount or Decimal('0.00')
+        old_due = instance.due_amount or Decimal('0.00')
+        old_paid = instance.paid_amount or Decimal('0.00')
+
+        if old_party:
+            if old_type == 'sale':
+                old_party.total_due = Decimal(str(old_party.total_due)) - old_due
+                old_party.total_sales = Decimal(str(old_party.total_sales)) - old_total
+                old_party.save()
+            elif old_type == 'purchase':
+                old_supplier_due = old_due
+                if instance.notes and instance.notes.strip().startswith('{'):
+                    try:
+                        first_line = instance.notes.split('\n')[0]
+                        meta = json.loads(first_line)
+                        if 'supplierDue' in meta and meta['supplierDue'] is not None:
+                            old_supplier_due = Decimal(str(meta['supplierDue']))
+                    except Exception:
+                        pass
+                old_party.total_due = Decimal(str(old_party.total_due)) - old_supplier_due
+                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_total
+                old_party.save()
+            elif old_type in ['sale_return', 'purchase_return']:
+                due_red = max(Decimal('0.00'), Decimal(str(old_total)) - Decimal(str(old_paid)))
+                old_party.total_due = Decimal(str(old_party.total_due)) + due_red
+                old_party.save()
+            elif old_type in ['payment_in', 'payment_out']:
+                old_party.total_due = Decimal(str(old_party.total_due)) + Decimal(str(old_paid))
+                old_party.save()
+
+        affected_product_ids = set(instance.items.exclude(product__isnull=True).values_list('product_id', flat=True))
+        instance.delete()
+
+        for pid in affected_product_ids:
+            recalculate_product_stock_and_cost(pid)
 
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
     queryset = ExpenseCategory.objects.all().order_by('name')
