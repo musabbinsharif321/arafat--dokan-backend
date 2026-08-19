@@ -38,6 +38,8 @@ def recalculate_product_stock_and_cost(product_or_id):
         tx = item.transaction
         if not tx:
             continue
+        if tx.status in ['pending', 'draft', 'cancelled', 'rejected']:
+            continue
         
         tx_type = tx.transaction_type
         qty = float(item.quantity or 0)
@@ -50,12 +52,14 @@ def recalculate_product_stock_and_cost(product_or_id):
                 try:
                     first_line = tx.notes.split('\n')[0]
                     meta = json.loads(first_line)
-                    ship = float(meta.get('shippingCost') or 0.0)
-                    lab = float(meta.get('laborCost') or 0.0)
-                    tot_extra = ship + lab
-                    tot_qty = sum(float(it.quantity or 0) for it in tx.items.all())
-                    if tot_qty > 0 and tot_extra > 0:
-                        extra_per_unit = tot_extra / tot_qty
+                    is_landed_auto = meta.get('isLandedCostAuto', True)
+                    if is_landed_auto is not False and is_landed_auto != 'false' and is_landed_auto != 0:
+                        ship = float(meta.get('shippingCost') or 0.0)
+                        lab = float(meta.get('laborCost') or 0.0)
+                        tot_extra = ship + lab
+                        tot_qty = sum(float(it.quantity or 0) for it in tx.items.all())
+                        if tot_qty > 0 and tot_extra > 0:
+                            extra_per_unit = tot_extra / tot_qty
                 except Exception:
                     pass
 
@@ -117,6 +121,8 @@ def generate_product_cost_log(product_or_id):
         tx = item.transaction
         if not tx:
             continue
+        if tx.status in ['pending', 'draft', 'cancelled', 'rejected']:
+            continue
         
         tx_type = tx.transaction_type
         qty = float(item.quantity or 0)
@@ -132,12 +138,14 @@ def generate_product_cost_log(product_or_id):
                 try:
                     first_line = tx.notes.split('\n')[0]
                     meta = json.loads(first_line)
-                    ship = float(meta.get('shippingCost') or 0.0)
-                    lab = float(meta.get('laborCost') or 0.0)
-                    tot_extra = ship + lab
-                    tot_qty = sum(float(it.quantity or 0) for it in tx.items.all())
-                    if tot_qty > 0 and tot_extra > 0:
-                        extra_per_unit = tot_extra / tot_qty
+                    is_landed_auto = meta.get('isLandedCostAuto', True)
+                    if is_landed_auto is not False and is_landed_auto != 'false' and is_landed_auto != 0:
+                        ship = float(meta.get('shippingCost') or 0.0)
+                        lab = float(meta.get('laborCost') or 0.0)
+                        tot_extra = ship + lab
+                        tot_qty = sum(float(it.quantity or 0) for it in tx.items.all())
+                        if tot_qty > 0 and tot_extra > 0:
+                            extra_per_unit = tot_extra / tot_qty
                 except Exception:
                     pass
 

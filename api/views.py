@@ -146,6 +146,17 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        instance = self.get_object()
+        if instance.status in ['completed', 'approved']:
+            return Response({'detail': 'ইনভয়েসটি ইতিমধ্যে অনুমোদিত হয়েছে', 'status': instance.status}, status=status.HTTP_200_OK)
+        
+        serializer = self.get_serializer(instance, data={'status': 'approved'}, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({'detail': 'ইনভয়েস সফলভাবে অনুমোদন করা হয়েছে', 'data': serializer.data}, status=status.HTTP_200_OK)
+
     def perform_destroy(self, instance):
         from decimal import Decimal
         import json
@@ -155,23 +166,27 @@ class TransactionViewSet(viewsets.ModelViewSet):
         old_due = instance.due_amount or Decimal('0.00')
         old_paid = instance.paid_amount or Decimal('0.00')
 
-        if old_party:
+        if old_party and instance.status not in ['pending', 'draft', 'cancelled', 'rejected']:
             if old_type == 'sale':
                 old_party.total_due = Decimal(str(old_party.total_due)) - old_due
                 old_party.total_sales = Decimal(str(old_party.total_sales)) - old_total
                 old_party.save()
             elif old_type == 'purchase':
-                old_supplier_due = old_due
+                old_supplier_due = Decimal(str(old_due))
+                old_supplier_purchases = Decimal(str(old_total))
                 if instance.notes and instance.notes.strip().startswith('{'):
                     try:
                         first_line = instance.notes.split('\n')[0]
                         meta = json.loads(first_line)
                         if 'supplierDue' in meta and meta['supplierDue'] is not None:
                             old_supplier_due = Decimal(str(meta['supplierDue']))
+                        ship = Decimal(str(meta.get('shippingCost') or 0))
+                        lab = Decimal(str(meta.get('laborCost') or 0))
+                        old_supplier_purchases = max(Decimal('0.00'), old_supplier_purchases - (ship + lab))
                     except Exception:
                         pass
                 old_party.total_due = Decimal(str(old_party.total_due)) - old_supplier_due
-                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_total
+                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_supplier_purchases
                 old_party.save()
             elif old_type in ['sale_return', 'purchase_return']:
                 due_red = max(Decimal('0.00'), Decimal(str(old_total)) - Decimal(str(old_paid)))
@@ -220,15 +235,15 @@ class DashboardStatsView(APIView):
         now = timezone.now()
         first_day_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # Sales aggregates
-        sales_qs = Transaction.objects.filter(transaction_type='sale')
+        # Sales aggregates (excluding pending / unapproved)
+        sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
         total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
         sales_paid = sales_qs.aggregate(total=Sum('paid_amount'))['total'] or 0
         total_dues = sales_qs.aggregate(total=Sum('due_amount'))['total'] or 0
         monthly_sales = sales_qs.filter(created_at__gte=first_day_of_month).aggregate(total=Sum('total_amount'))['total'] or 0
 
-        # Purchase aggregates
-        purchases_qs = Transaction.objects.filter(transaction_type='purchase')
+        # Purchase aggregates (excluding pending / unapproved)
+        purchases_qs = Transaction.objects.filter(transaction_type='purchase').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
         total_purchases = purchases_qs.aggregate(total=Sum('total_amount'))['total'] or 0
         purchases_paid = purchases_qs.aggregate(total=Sum('paid_amount'))['total'] or 0
         monthly_purchases = purchases_qs.filter(created_at__gte=first_day_of_month).aggregate(total=Sum('total_amount'))['total'] or 0
@@ -237,10 +252,11 @@ class DashboardStatsView(APIView):
         total_expenses = Expense.objects.aggregate(total=Sum('amount'))['total'] or 0
         monthly_expenses = Expense.objects.filter(date__gte=first_day_of_month.date()).aggregate(total=Sum('amount'))['total'] or 0
 
-        # Cash & Bank Balance (Real calculation)
-        banks_total = Bank.objects.aggregate(total=Sum('balance'))['total'] or 0
-        total_cash = max(0, float(sales_paid) - float(purchases_paid) - float(total_expenses))
-        total_bank = float(banks_total)
+        # Cash & Bank Balance (Unified real calculation)
+        from .serializers import get_available_balances
+        cash_balance, bank_balance = get_available_balances()
+        total_cash = float(cash_balance)
+        total_bank = float(bank_balance)
 
         # Inventory Low Stock
         low_stock_count = Product.objects.filter(stock__lte=F('min_stock')).count()
@@ -257,12 +273,12 @@ class DashboardStatsView(APIView):
             day_sales = Transaction.objects.filter(
                 transaction_type='sale',
                 created_at__date=day_date
-            ).aggregate(total=Sum('total_amount'))['total'] or 0
+            ).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(total=Sum('total_amount'))['total'] or 0
 
             day_purchases = Transaction.objects.filter(
                 transaction_type='purchase',
                 created_at__date=day_date
-            ).aggregate(total=Sum('total_amount'))['total'] or 0
+            ).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(total=Sum('total_amount'))['total'] or 0
 
             weekly_data.append({
                 'name': day_name,

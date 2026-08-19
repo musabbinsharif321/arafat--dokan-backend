@@ -208,6 +208,94 @@ def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None
     return new_prod
 
 
+def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
+    from django.db.models import Sum
+    from .models import Transaction, Expense, Bank
+
+    sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
+    purchases_qs = Transaction.objects.filter(transaction_type='purchase').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
+    p_in_qs = Transaction.objects.filter(transaction_type='payment_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
+    p_out_qs = Transaction.objects.filter(transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
+    exp_qs = Expense.objects.all()
+
+    if exclude_tx_id:
+        sales_qs = sales_qs.exclude(id=exclude_tx_id)
+        purchases_qs = purchases_qs.exclude(id=exclude_tx_id)
+        p_in_qs = p_in_qs.exclude(id=exclude_tx_id)
+        p_out_qs = p_out_qs.exclude(id=exclude_tx_id)
+
+    if exclude_expense_id:
+        exp_qs = exp_qs.exclude(id=exclude_expense_id)
+
+    cash_in = Decimal('0.00')
+    bank_in = Decimal('0.00')
+
+    import json
+
+    # Process all active sales and payment_in transactions
+    for t in list(sales_qs) + list(p_in_qs):
+        pm = (t.payment_method or 'cash').lower()
+        paid = Decimal(str(t.paid_amount or 0))
+        meta = {}
+        if t.notes and t.notes.strip().startswith('{'):
+            try:
+                meta = json.loads(t.notes.split('\n')[0])
+            except Exception:
+                meta = {}
+
+        if pm == 'split':
+            # Split: Only the cash portion enters cash immediately
+            c_part = Decimal(str(meta.get('cashPaidAmount') or meta.get('splitCashAmount') or 0))
+            q_part = Decimal(str(meta.get('chequePaidAmount') or meta.get('splitChequeAmount') or 0))
+            if c_part == 0 and q_part == 0:
+                c_part = paid
+            cash_in += c_part
+            # Cheque portion ONLY enters cash balance once it is cleared/cashed
+            if t.cheque_status == 'cleared':
+                cash_in += q_part
+        elif pm in ['cheque', 'check']:
+            # Standalone cheque: ONLY enters balance once cashed/cleared
+            if t.cheque_status == 'cleared':
+                cash_in += paid
+        elif pm in ['bank', 'banktobank', 'mobile_banking', 'mobile', 'bkash']:
+            bank_in += paid
+        else: # cash
+            cash_in += paid
+    
+    # Calculate extra shipping and labor paid in cash from active purchases
+    extra_purchase_cash_out = Decimal('0.00')
+    for p in purchases_qs.filter(notes__startswith='{'):
+        try:
+            meta_p = json.loads(p.notes.split('\n')[0])
+            s_p = Decimal(str(meta_p.get('shippingPaidAmount') or (meta_p.get('shippingCost') if meta_p.get('shippingStatus') == 'paid' else 0) or 0))
+            l_p = Decimal(str(meta_p.get('laborPaidAmount') or (meta_p.get('laborCost') if meta_p.get('laborStatus') == 'paid' else 0) or 0))
+            extra_purchase_cash_out += (s_p + l_p)
+        except Exception:
+            pass
+
+    # Exclude any settlement payment_out/in transactions that duplicate purchase notes
+    filtered_p_out_qs = p_out_qs.exclude(notes__contains='গাড়ি ভাড়া পরিশোধ').exclude(notes__contains='লেবার খরচ')
+    filtered_p_in_qs = p_in_qs.exclude(notes__contains='গাড়ি ভাড়া হ্রাস সমন্বয়').exclude(notes__contains='লেবার খরচ হ্রাস সমন্বয়')
+
+    cash_out = (
+        (purchases_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
+        extra_purchase_cash_out +
+        (filtered_p_out_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
+        (exp_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
+    )
+    cash_balance = cash_in - cash_out
+
+    bank_out = (
+        (purchases_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
+        (filtered_p_out_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
+        (exp_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
+    )
+    banks_initial = Bank.objects.aggregate(tot=Sum('balance'))['tot'] or Decimal('0.00')
+    bank_balance = banks_initial + bank_in - bank_out
+
+    return cash_balance, bank_balance
+
+
 from .services import recalculate_product_stock_and_cost
 
 class TransactionSerializer(serializers.ModelSerializer):
@@ -224,6 +312,76 @@ class TransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transaction
         fields = '__all__'
+
+    def validate(self, attrs):
+        tx_type = attrs.get('transaction_type') or (self.instance.transaction_type if self.instance else None)
+        paid_amt = attrs.get('paid_amount')
+        if paid_amt is None and self.instance:
+            paid_amt = self.instance.paid_amount
+        paid_amt = Decimal(str(paid_amt or 0))
+
+        pay_method = (attrs.get('payment_method') or (self.instance.payment_method if self.instance else 'cash') or 'cash').lower()
+        curr_status = attrs.get('status') or (self.instance.status if self.instance else 'pending')
+
+        # Enforce balance check on money outflows (purchase or payment_out) only when active/approved
+        if tx_type in ['purchase', 'payment_out'] and curr_status not in ['pending', 'draft', 'cancelled', 'rejected']:
+            exclude_id = self.instance.id if self.instance else None
+            cash_bal, bank_bal = get_available_balances(exclude_tx_id=exclude_id)
+            
+            notes_val = attrs.get('notes') or (self.instance.notes if self.instance else '')
+            meta = {}
+            if notes_val and notes_val.strip().startswith('{'):
+                try:
+                    import json
+                    meta = json.loads(notes_val.split('\n')[0])
+                except Exception:
+                    meta = {}
+
+            is_bank_to_bank = 'banktobank' in pay_method or meta.get('paymentMethodName') == 'BankToBank' or 'bank_to_bank' in str(meta).lower()
+            is_cheque = any(c in pay_method for c in ['cheque', 'check']) or meta.get('paymentMethodName') == 'Cheque'
+
+            # Calculate additional cash paid for shipping and labor
+            ship_paid = Decimal(str(meta.get('shippingPaidAmount') or (meta.get('shippingCost') if meta.get('shippingStatus') == 'paid' else 0) or 0))
+            lab_paid = Decimal(str(meta.get('laborPaidAmount') or (meta.get('laborCost') if meta.get('laborStatus') == 'paid' else 0) or 0))
+            extra_cash_expenses = ship_paid + lab_paid
+
+            if is_bank_to_bank or is_cheque:
+                # Bank-to-Bank and Cheque: Check the specifically selected bank account for goods payment
+                target_bank = None
+                bank_id = meta.get('bankId') or meta.get('bank_id')
+                bank_name = meta.get('selectedShopBank') or meta.get('bankName') or meta.get('chequeBank')
+                if bank_id:
+                    target_bank = Bank.objects.filter(id=int(bank_id)).first()
+                elif bank_name:
+                    clean_bn = str(bank_name).split(' - ')[0].split(' (')[0].strip()
+                    target_bank = Bank.objects.filter(name__icontains=clean_bn).first()
+
+                avail_balance = target_bank.balance if target_bank else bank_bal
+                bank_label = f"'{target_bank.name}'" if target_bank else "ব্যাংক"
+                if paid_amt > avail_balance:
+                    raise serializers.ValidationError({
+                        'paid_amount': f"পর্যাপ্ত ব্যাংক ব্যালেন্স নেই! (নির্বাচিত {bank_label} একাউন্ট ব্যালেন্স: ৳ {avail_balance:,.2f}, পেমেন্ট দিতে চাচ্ছেন: ৳ {paid_amt:,.2f})। অনুগ্রহ করে আগে এই ব্যাংক একাউন্টে ব্যালেন্স জমা করুন অথবা বাকি চালান হিসেবে কাটুন।"
+                    })
+                
+                # Check cash balance for shipping and labor if paid in cash
+                if extra_cash_expenses > 0 and extra_cash_expenses > cash_bal:
+                    raise serializers.ValidationError({
+                        'paid_amount': f"পর্যাপ্ত নগদ ক্যাশ ব্যালেন্স নেই! (বর্তমান ক্যাশ ব্যালেন্স: ৳ {cash_bal:,.2f}, গাড়ি ভাড়া ও লেবার বাবদ নগদ পরিশোধ করতে চাচ্ছেন: ৳ {extra_cash_expenses:,.2f} [গাড়ি ভাড়া: ৳ {ship_paid:,.2f}, লেবার: ৳ {lab_paid:,.2f}])। ক্যাশে পর্যাপ্ত ব্যালেন্স না থাকলে গাড়ি ভাড়া/লেবার নগদ পরিশোধ করা যাবে না।"
+                    })
+            else:
+                # Cash & Bank Transfer: Check Cash balance for total cash outflow (goods paid + shipping + labor)
+                total_cash_needed = paid_amt + extra_cash_expenses
+                if total_cash_needed > 0 and total_cash_needed > cash_bal:
+                    breakdown = f"পণ্য বাবদ: ৳ {paid_amt:,.2f}"
+                    if ship_paid > 0:
+                        breakdown += f" + গাড়ি ভাড়া: ৳ {ship_paid:,.2f}"
+                    if lab_paid > 0:
+                        breakdown += f" + লেবার খরচ: ৳ {lab_paid:,.2f}"
+                    raise serializers.ValidationError({
+                        'paid_amount': f"পর্যাপ্ত নগদ ক্যাশ ব্যালেন্স নেই! (বর্তমান ক্যাশ ব্যালেন্স: ৳ {cash_bal:,.2f}, মোট নগদ পরিশোধ করতে চাচ্ছেন: ৳ {total_cash_needed:,.2f} [{breakdown}])। ক্যাশে পর্যাপ্ত ব্যালেন্স না থাকলে নগদ প্রদান বা গাড়ি ভাড়া/লেবার পরিশোধ করা যাবে না।"
+                    })
+
+        return attrs
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
@@ -269,13 +427,16 @@ class TransactionSerializer(serializers.ModelSerializer):
                     prod.sell_price = round(float(sell_price_input), 2)
                     prod.save(update_fields=['sell_price'])
 
-        if party:
+        is_active = transaction.status not in ['pending', 'draft', 'cancelled', 'rejected']
+
+        if party and is_active:
             if transaction.transaction_type == 'sale':
                 party.total_due += transaction.due_amount
                 party.total_sales += transaction.total_amount
                 party.save()
             elif transaction.transaction_type == 'purchase':
                 supplier_due = transaction.due_amount
+                supplier_purchases = Decimal(str(transaction.total_amount or 0))
                 if transaction.notes and transaction.notes.strip().startswith('{'):
                     try:
                         import json
@@ -283,10 +444,13 @@ class TransactionSerializer(serializers.ModelSerializer):
                         meta = json.loads(first_line)
                         if 'supplierDue' in meta and meta['supplierDue'] is not None:
                             supplier_due = Decimal(str(meta['supplierDue']))
+                        ship = Decimal(str(meta.get('shippingCost') or 0))
+                        lab = Decimal(str(meta.get('laborCost') or 0))
+                        supplier_purchases = max(Decimal('0.00'), supplier_purchases - (ship + lab))
                     except Exception:
                         pass
                 party.total_due += supplier_due
-                party.total_purchases += transaction.total_amount
+                party.total_purchases += supplier_purchases
                 party.save()
             elif transaction.transaction_type in ['sale_return', 'purchase_return']:
                 due_reduction = max(Decimal('0.00'), Decimal(str(transaction.total_amount)) - Decimal(str(transaction.paid_amount)))
@@ -297,8 +461,9 @@ class TransactionSerializer(serializers.ModelSerializer):
                 party.save()
 
         # Chronologically recalculate stock & weighted cost for all affected products
-        for pid in affected_product_ids:
-            recalculate_product_stock_and_cost(pid)
+        if is_active:
+            for pid in affected_product_ids:
+                recalculate_product_stock_and_cost(pid)
 
         return transaction
 
@@ -313,24 +478,30 @@ class TransactionSerializer(serializers.ModelSerializer):
 
         affected_product_ids = set(instance.items.exclude(product__isnull=True).values_list('product_id', flat=True))
 
-        # 1. Revert previous transaction effects on old party
-        if old_party:
+        old_is_active = instance.status not in ['pending', 'draft', 'cancelled', 'rejected']
+
+        # 1. Revert previous transaction effects on old party if it was active
+        if old_party and old_is_active:
             if old_type == 'sale':
                 old_party.total_due = Decimal(str(old_party.total_due)) - old_due
                 old_party.total_sales = Decimal(str(old_party.total_sales)) - old_total
                 old_party.save()
             elif old_type == 'purchase':
                 old_supplier_due = old_due
+                old_supplier_purchases = old_total
                 if instance.notes and instance.notes.strip().startswith('{'):
                     try:
                         first_line = instance.notes.split('\n')[0]
                         meta = json.loads(first_line)
                         if 'supplierDue' in meta and meta['supplierDue'] is not None:
                             old_supplier_due = Decimal(str(meta['supplierDue']))
+                        ship = Decimal(str(meta.get('shippingCost') or 0))
+                        lab = Decimal(str(meta.get('laborCost') or 0))
+                        old_supplier_purchases = max(Decimal('0.00'), old_supplier_purchases - (ship + lab))
                     except Exception:
                         pass
                 old_party.total_due = Decimal(str(old_party.total_due)) - old_supplier_due
-                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_total
+                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_supplier_purchases
                 old_party.save()
             elif old_type in ['sale_return', 'purchase_return']:
                 due_red = max(Decimal('0.00'), old_total - old_paid)
@@ -376,8 +547,9 @@ class TransactionSerializer(serializers.ModelSerializer):
                         prod.sell_price = round(float(sell_price_input), 2)
                         prod.save(update_fields=['sell_price'])
 
-        # 5. Apply new transaction effect on current/updated party
-        if instance.party_id:
+        # 5. Apply new transaction effect on current/updated party ONLY if new transaction is active
+        new_is_active = instance.status not in ['pending', 'draft', 'cancelled', 'rejected']
+        if instance.party_id and new_is_active:
             new_party = Party.objects.filter(id=instance.party_id).first()
             if new_party:
                 if instance.transaction_type == 'sale':
@@ -386,16 +558,20 @@ class TransactionSerializer(serializers.ModelSerializer):
                     new_party.save()
                 elif instance.transaction_type == 'purchase':
                     supplier_due = Decimal(str(instance.due_amount or 0))
+                    supplier_purchases = Decimal(str(instance.total_amount or 0))
                     if instance.notes and instance.notes.strip().startswith('{'):
                         try:
                             first_line = instance.notes.split('\n')[0]
                             meta = json.loads(first_line)
                             if 'supplierDue' in meta and meta['supplierDue'] is not None:
                                 supplier_due = Decimal(str(meta['supplierDue']))
+                            ship = Decimal(str(meta.get('shippingCost') or 0))
+                            lab = Decimal(str(meta.get('laborCost') or 0))
+                            supplier_purchases = max(Decimal('0.00'), supplier_purchases - (ship + lab))
                         except Exception:
                             pass
                     new_party.total_due = Decimal(str(new_party.total_due)) + supplier_due
-                    new_party.total_purchases = Decimal(str(new_party.total_purchases)) + Decimal(str(instance.total_amount or 0))
+                    new_party.total_purchases = Decimal(str(new_party.total_purchases)) + supplier_purchases
                     new_party.save()
                 elif instance.transaction_type in ['sale_return', 'purchase_return']:
                     due_reduction = max(Decimal('0.00'), Decimal(str(instance.total_amount or 0)) - Decimal(str(instance.paid_amount or 0)))
@@ -422,6 +598,59 @@ class ExpenseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Expense
         fields = '__all__'
+
+    def validate(self, attrs):
+        cat_name = attrs.get('category_name') or (self.instance.category_name if self.instance else '')
+        if not attrs.get('title'):
+            attrs['title'] = cat_name or 'সাধারণ খরচ'
+
+        amt = attrs.get('amount')
+        if amt is None and self.instance:
+            amt = self.instance.amount
+        amt = Decimal(str(amt or 0))
+
+        pay_method = (attrs.get('payment_method') or (self.instance.payment_method if self.instance else 'cash') or 'cash').lower()
+
+        if amt > 0:
+            exclude_id = self.instance.id if self.instance else None
+            cash_bal, bank_bal = get_available_balances(exclude_expense_id=exclude_id)
+            is_bank = any(b in pay_method for b in ['bank', 'cheque', 'mobile', 'bkash'])
+            if is_bank:
+                target_bank = attrs.get('bank_account') or (self.instance.bank_account if self.instance else None)
+                if target_bank:
+                    target_bank_bal = target_bank.balance
+                    if amt > target_bank_bal:
+                        raise serializers.ValidationError({
+                            'amount': f"পর্যাপ্ত ব্যাংক ব্যালেন্স নেই! (নির্বাচিত '{target_bank.name}' একাউন্ট ব্যালেন্স: ৳ {target_bank_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে এই ব্যাংক একাউন্টে ব্যালেন্স জমা করুন।"
+                        })
+                elif amt > bank_bal:
+                    raise serializers.ValidationError({
+                        'amount': f"পর্যাপ্ত ব্যাংক ব্যালেন্স নেই! (বর্তমান ব্যাংক ব্যালেন্স: ৳ {bank_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে ব্যাংকে ব্যালেন্স জমা করুন।"
+                    })
+            else:
+                if amt > cash_bal:
+                    raise serializers.ValidationError({
+                        'amount': f"পর্যাপ্ত নগদ ক্যাশ ব্যালেন্স নেই! (বর্তমান ক্যাশ ব্যালেন্স: ৳ {cash_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে ক্যাশে ব্যালেন্স জমা করুন।"
+                    })
+        return attrs
+
+    def create(self, validated_data):
+        cat_name = validated_data.get('category_name')
+        if cat_name and not validated_data.get('category'):
+            cat, _ = ExpenseCategory.objects.get_or_create(name=cat_name.strip())
+            validated_data['category'] = cat
+        if not validated_data.get('title') and cat_name:
+            validated_data['title'] = cat_name
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        cat_name = validated_data.get('category_name')
+        if cat_name and not validated_data.get('category'):
+            cat, _ = ExpenseCategory.objects.get_or_create(name=cat_name.strip())
+            validated_data['category'] = cat
+        if not validated_data.get('title') and cat_name:
+            validated_data['title'] = cat_name
+        return super().update(instance, validated_data)
 
 class HawlatSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
