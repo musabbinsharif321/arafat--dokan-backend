@@ -6,6 +6,7 @@ import django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dokan_backend.settings')
 django.setup()
 
+from django.contrib.auth.models import User
 from api.models import (
     ShopSettings,
     Party,
@@ -15,11 +16,44 @@ from api.models import (
     Transaction,
     TransactionItem,
     ExpenseCategory,
-    Expense
+    Expense,
+    UserProfile
 )
 
 def seed():
     print("Seeding Dokan ERP initial database...")
+
+    # 0. Initial Users with 3 Roles (Admin, Staff, Viewer)
+    admin_u, _ = User.objects.get_or_create(username='admin', defaults={'email': 'admin@dokan.com', 'first_name': 'দোকান মালিক (এডমিন)', 'is_staff': True, 'is_superuser': True})
+    admin_u.set_password('admin123')
+    admin_u.is_staff = True
+    admin_u.is_superuser = True
+    admin_u.save()
+    p_admin, _ = UserProfile.objects.get_or_create(user=admin_u)
+    p_admin.role = 'admin'
+    p_admin.full_name = 'দোকান মালিক (এডমিন)'
+    p_admin.phone = '01711000000'
+    p_admin.save()
+
+    staff_u, _ = User.objects.get_or_create(username='staff', defaults={'email': 'staff@dokan.com', 'first_name': 'স্টাফ ম্যানেজার', 'is_staff': False, 'is_superuser': False})
+    staff_u.set_password('staff123')
+    staff_u.save()
+    p_staff, _ = UserProfile.objects.get_or_create(user=staff_u)
+    p_staff.role = 'staff'
+    p_staff.full_name = 'স্টাফ ম্যানেজার'
+    p_staff.phone = '01711000001'
+    p_staff.save()
+
+    viewer_u, _ = User.objects.get_or_create(username='viewer', defaults={'email': 'viewer@dokan.com', 'first_name': 'রিপোর্ট ভিউয়ার', 'is_staff': False, 'is_superuser': False})
+    viewer_u.set_password('viewer123')
+    viewer_u.save()
+    p_viewer, _ = UserProfile.objects.get_or_create(user=viewer_u)
+    p_viewer.role = 'viewer'
+    p_viewer.full_name = 'রিপোর্ট ভিউয়ার'
+    p_viewer.phone = '01711000002'
+    p_viewer.save()
+
+    print("Users initialized: admin (Full Access), staff (No Invoice Edit/Delete), viewer (Read-Only).")
 
     # 1. Shop Settings
     settings, created = ShopSettings.objects.get_or_create(id=1, defaults={

@@ -1,10 +1,14 @@
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.authtoken.models import Token
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.models import User
 from django.db.models import Sum, Count, F, Q
 from django.utils import timezone
 from datetime import timedelta
 
+from .permissions import RoleBasedAccessPermission, IsAdminUserOnly, get_user_role
 from .models import (
     ShopSettings,
     Party,
@@ -15,7 +19,8 @@ from .models import (
     TransactionItem,
     ExpenseCategory,
     Expense,
-    Hawlat
+    Hawlat,
+    UserProfile
 )
 from .serializers import (
     ShopSettingsSerializer,
@@ -26,12 +31,15 @@ from .serializers import (
     TransactionSerializer,
     ExpenseCategorySerializer,
     ExpenseSerializer,
-    HawlatSerializer
+    HawlatSerializer,
+    UserSerializer,
+    UserProfileSerializer
 )
 
 class ShopSettingsViewSet(viewsets.ModelViewSet):
     queryset = ShopSettings.objects.all()
     serializer_class = ShopSettingsSerializer
+    permission_classes = [RoleBasedAccessPermission]
 
     def get_queryset(self):
         # Ensure at least one default settings object exists
@@ -42,6 +50,7 @@ class ShopSettingsViewSet(viewsets.ModelViewSet):
 class PartyViewSet(viewsets.ModelViewSet):
     queryset = Party.objects.all().order_by('-created_at')
     serializer_class = PartySerializer
+    permission_classes = [RoleBasedAccessPermission]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -53,6 +62,8 @@ class PartyViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(Q(party_type='customer') | Q(party_type='both'))
             elif party_type == 'supplier':
                 qs = qs.filter(Q(party_type='supplier') | Q(party_type='both'))
+            elif party_type == 'engineer':
+                qs = qs.filter(party_type='engineer')
         
         if search:
             qs = qs.filter(
@@ -66,6 +77,7 @@ class PartyViewSet(viewsets.ModelViewSet):
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by('name')
     serializer_class = CategorySerializer
+    permission_classes = [RoleBasedAccessPermission]
 
 from rest_framework.decorators import action
 from .services import recalculate_product_stock_and_cost, generate_product_cost_log
@@ -73,6 +85,7 @@ from .services import recalculate_product_stock_and_cost, generate_product_cost_
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all().order_by('name')
     serializer_class = ProductSerializer
+    permission_classes = [RoleBasedAccessPermission]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -113,12 +126,15 @@ class ProductViewSet(viewsets.ModelViewSet):
 class BankViewSet(viewsets.ModelViewSet):
     queryset = Bank.objects.all().order_by('name')
     serializer_class = BankSerializer
+    permission_classes = [RoleBasedAccessPermission]
 
 from .services import recalculate_product_stock_and_cost
 
 class TransactionViewSet(viewsets.ModelViewSet):
     queryset = Transaction.objects.all().order_by('-created_at')
     serializer_class = TransactionSerializer
+    permission_classes = [RoleBasedAccessPermission]
+    is_transaction_view = True
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -146,8 +162,30 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def update(self, request, *args, **kwargs):
+        role = get_user_role(request.user)
+        if role in ['staff', 'viewer']:
+            return Response({'detail': 'স্টাফ বা ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস এডিট বা পরিবর্তন করার অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        role = get_user_role(request.user)
+        if role in ['staff', 'viewer']:
+            return Response({'detail': 'স্টাফ বা ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস এডিট বা পরিবর্তন করার অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        role = get_user_role(request.user)
+        if role in ['staff', 'viewer']:
+            return Response({'detail': 'স্টাফ বা ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস মুছে ফেলার (Delete) অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
+        role = get_user_role(request.user)
+        if role == 'viewer':
+            return Response({'detail': 'ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস অনুমোদন করার অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        
         instance = self.get_object()
         if instance.status in ['completed', 'approved']:
             return Response({'detail': 'ইনভয়েসটি ইতিমধ্যে অনুমোদিত হয়েছে', 'status': instance.status}, status=status.HTTP_200_OK)
@@ -205,10 +243,12 @@ class TransactionViewSet(viewsets.ModelViewSet):
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
     queryset = ExpenseCategory.objects.all().order_by('name')
     serializer_class = ExpenseCategorySerializer
+    permission_classes = [RoleBasedAccessPermission]
 
 class ExpenseViewSet(viewsets.ModelViewSet):
     queryset = Expense.objects.all().order_by('-date', '-created_at')
     serializer_class = ExpenseSerializer
+    permission_classes = [RoleBasedAccessPermission]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -231,6 +271,8 @@ class DashboardStatsView(APIView):
     """
     High performance server-side aggregator for instant ERP Dashboard loading.
     """
+    permission_classes = [RoleBasedAccessPermission]
+
     def get(self, request):
         now = timezone.now()
         first_day_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -309,5 +351,156 @@ class DashboardStatsView(APIView):
 class HawlatViewSet(viewsets.ModelViewSet):
     queryset = Hawlat.objects.all().order_by('-created_at')
     serializer_class = HawlatSerializer
+    permission_classes = [RoleBasedAccessPermission]
+
+
+# ==========================================
+# AUTHENTICATION & USER MANAGEMENT API VIEWS
+# ==========================================
+
+class LoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        username_or_phone = request.data.get('username', '').strip()
+        password = request.data.get('password', '').strip()
+
+        if not username_or_phone or not password:
+            return Response({'detail': 'ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Lookup by username
+        user = User.objects.filter(username__iexact=username_or_phone).first()
+
+        # 2. Lookup by email
+        if not user:
+            user = User.objects.filter(email__iexact=username_or_phone).first()
+
+        # 3. Lookup by profile phone
+        if not user:
+            profile = UserProfile.objects.filter(phone=username_or_phone).first()
+            if profile:
+                user = profile.user
+
+        if user and user.check_password(password):
+            if not user.is_active:
+                return Response({'detail': 'আপনার একাউন্টটি নিষ্ক্রিয় করা আছে। এডমিনের সাথে যোগাযোগ করুন।'}, status=status.HTTP_403_FORBIDDEN)
+
+            token, _ = Token.objects.get_or_create(user=user)
+            serializer = UserSerializer(user)
+            return Response({
+                'token': token.key,
+                'user': serializer.data,
+                'message': 'সফলভাবে লগইন হয়েছে।'
+            }, status=status.HTTP_200_OK)
+
+        return Response({'detail': 'ভুল ইউজারনেম অথবা পাসওয়ার্ড! সঠিক তথ্য দিন।'}, status=status.HTTP_401_UNAUTHORIZED)
+
+
+class MeView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        serializer = UserSerializer(request.user)
+        return Response(serializer.data)
+
+
+class LogoutView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        try:
+            if hasattr(request.user, 'auth_token'):
+                request.user.auth_token.delete()
+        except Exception:
+            pass
+        logout(request)
+        return Response({'message': 'সফলভাবে লগআউট হয়েছে।'}, status=status.HTTP_200_OK)
+
+
+class UserManagementViewSet(viewsets.ModelViewSet):
+    """
+    Admin-only endpoint for managing Dokan ERP users (Admin, Staff, Viewer).
+    """
+    queryset = User.objects.all().order_by('-date_joined')
+    serializer_class = UserSerializer
+    permission_classes = [IsAdminUserOnly]
+
+    def create(self, request, *args, **kwargs):
+        username = request.data.get('username', '').strip()
+        password = request.data.get('password', '').strip()
+        role = request.data.get('role', 'staff').strip()
+        full_name = request.data.get('full_name', '').strip()
+        phone = request.data.get('phone', '').strip()
+        email = request.data.get('email', '').strip()
+
+        if not username or not password:
+            return Response({'detail': 'ইউজারনেম এবং পাসওয়ার্ড প্রদান করা আবশ্যক।'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if User.objects.filter(username__iexact=username).exists():
+            return Response({'detail': f"'{username}' ইউজারনেম ইতিমধ্যে ব্যবহার করা হয়েছে। অন্য ইউজারনেম দিন।"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.create_user(
+            username=username,
+            password=password,
+            email=email,
+            first_name=full_name
+        )
+        if role == 'admin':
+            user.is_staff = True
+            user.is_superuser = True
+            user.save()
+
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        profile.role = role
+        profile.full_name = full_name
+        profile.phone = phone
+        profile.save()
+
+        return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        user = self.get_object()
+        role = request.data.get('role')
+        full_name = request.data.get('full_name')
+        phone = request.data.get('phone')
+        password = request.data.get('password')
+        email = request.data.get('email')
+
+        if password:
+            user.set_password(password)
+
+        if email is not None:
+            user.email = email
+
+        if full_name:
+            user.first_name = full_name
+
+        if role:
+            if role == 'admin':
+                user.is_superuser = True
+                user.is_staff = True
+            else:
+                user.is_superuser = False
+                user.is_staff = False
+        user.save()
+
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        if role:
+            profile.role = role
+        if full_name is not None:
+            profile.full_name = full_name
+        if phone is not None:
+            profile.phone = phone
+        profile.save()
+
+        return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
+
+    def destroy(self, request, *args, **kwargs):
+        user = self.get_object()
+        if user == request.user:
+            return Response({'detail': 'আপনি নিজের এডমিন একাউন্ট ডিলিট করতে পারবেন না।'}, status=status.HTTP_400_BAD_REQUEST)
+        user.delete()
+        return Response({'detail': 'ইউজার সফলভাবে মুছে ফেলা হয়েছে।'}, status=status.HTTP_204_NO_CONTENT)
+
 
 

@@ -273,22 +273,34 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
         except Exception:
             pass
 
-    # Exclude any settlement payment_out/in transactions that duplicate purchase notes
-    filtered_p_out_qs = p_out_qs.exclude(notes__contains='গাড়ি ভাড়া পরিশোধ').exclude(notes__contains='লেবার খরচ')
-    filtered_p_in_qs = p_in_qs.exclude(notes__contains='গাড়ি ভাড়া হ্রাস সমন্বয়').exclude(notes__contains='লেবার খরচ হ্রাস সমন্বয়')
+    # Calculate extra cement loading paid in cash from active sales
+    extra_sales_cash_out = Decimal('0.00')
+    for s in sales_qs.filter(notes__startswith='{'):
+        try:
+            meta_s = json.loads(s.notes.split('\n')[0])
+            c_p = Decimal(str(meta_s.get('cementLoadingPaidAmount') or (meta_s.get('cementLaborCost') if meta_s.get('cementLoadingPaid') else 0) or 0))
+            extra_sales_cash_out += c_p
+        except Exception:
+            pass
+
+    # Exclude any settlement payment_out/in transactions and duplicate expenses that duplicate purchase/sales notes
+    filtered_p_out_qs = p_out_qs.exclude(notes__contains='গাড়ি ভাড়া').exclude(notes__contains='লেবার').exclude(notes__contains='লোডিং')
+    filtered_p_in_qs = p_in_qs.exclude(notes__contains='গাড়ি ভাড়া').exclude(notes__contains='লেবার').exclude(notes__contains='লোডিং')
+    filtered_exp_qs = exp_qs.exclude(title__contains='লোডিং চার্জ').exclude(title__contains='আনলোডিং চার্জ').exclude(title__contains='গাড়ি ভাড়া')
 
     cash_out = (
         (purchases_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
         extra_purchase_cash_out +
+        extra_sales_cash_out +
         (filtered_p_out_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
-        (exp_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
+        (filtered_exp_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
     )
     cash_balance = cash_in - cash_out
 
     bank_out = (
         (purchases_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
         (filtered_p_out_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
-        (exp_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
+        (filtered_exp_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
     )
     banks_initial = Bank.objects.aggregate(tot=Sum('balance'))['tot'] or Decimal('0.00')
     bank_balance = banks_initial + bank_in - bank_out
@@ -658,4 +670,58 @@ class HawlatSerializer(serializers.ModelSerializer):
     class Meta:
         model = Hawlat
         fields = '__all__'
+
+
+from django.contrib.auth.models import User
+from .models import UserProfile
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
+    role_badge = serializers.CharField(source='role_display_badge', read_only=True)
+
+    class Meta:
+        model = UserProfile
+        fields = ['id', 'role', 'role_display', 'role_badge', 'full_name', 'phone', 'is_active', 'created_at']
+
+
+class UserSerializer(serializers.ModelSerializer):
+    profile = UserProfileSerializer(read_only=True)
+    role = serializers.SerializerMethodField()
+    role_display = serializers.SerializerMethodField()
+    role_badge = serializers.SerializerMethodField()
+    full_name = serializers.SerializerMethodField()
+    phone = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'profile', 'role', 'role_display', 'role_badge', 'full_name', 'phone', 'date_joined']
+
+    def get_role(self, obj):
+        if obj.is_superuser:
+            return 'admin'
+        if hasattr(obj, 'profile') and obj.profile:
+            return obj.profile.role
+        return 'staff'
+
+    def get_role_display(self, obj):
+        if hasattr(obj, 'profile') and obj.profile:
+            return obj.profile.get_role_display()
+        return 'অ্যাডমিন' if obj.is_superuser else 'স্টাফ'
+
+    def get_role_badge(self, obj):
+        if hasattr(obj, 'profile') and obj.profile:
+            return obj.profile.role_display_badge
+        return '👑 অ্যাডমিন' if obj.is_superuser else '👔 স্টাফ'
+
+    def get_full_name(self, obj):
+        if hasattr(obj, 'profile') and obj.profile and obj.profile.full_name:
+            return obj.profile.full_name
+        name = f"{obj.first_name} {obj.last_name}".strip()
+        return name or obj.username
+
+    def get_phone(self, obj):
+        if hasattr(obj, 'profile') and obj.profile:
+            return obj.profile.phone or ''
+        return ''
+
 

@@ -22,6 +22,7 @@ class Party(models.Model):
     PARTY_TYPES = [
         ('customer', 'Customer'),
         ('supplier', 'Supplier'),
+        ('engineer', 'Engineer'),
         ('both', 'Both'),
     ]
 
@@ -209,4 +210,51 @@ class Hawlat(models.Model):
 
     def __str__(self):
         return f"{self.person_name} - {self.amount}"
+
+
+class UserProfile(models.Model):
+    ROLE_CHOICES = [
+        ('admin', 'অ্যাডমিন (Admin)'),
+        ('staff', 'স্টাফ / ম্যানেজার (Staff - No Invoice Edit/Delete)'),
+        ('viewer', 'ভিউয়ার (Viewer - Read Only)'),
+    ]
+
+    user = models.OneToOneField('auth.User', on_delete=models.CASCADE, related_name='profile')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='staff')
+    full_name = models.CharField(max_length=255, blank=True, null=True)
+    phone = models.CharField(max_length=50, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.username} ({self.get_role_display()})"
+
+    @property
+    def role_display_badge(self):
+        if self.role == 'admin':
+            return '👑 অ্যাডমিন (সব ক্ষমতা)'
+        elif self.role == 'staff':
+            return '👔 স্টাফ (ইনভয়েস এডিট/ডিলিট ব্যতীত সব ক্ষমতা)'
+        elif self.role == 'viewer':
+            return '👁️ ভিউয়ার (শুধুমাত্র দেখার অনুমতি)'
+        return self.role
+
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from django.contrib.auth.models import User
+
+@receiver(post_save, sender=User)
+def create_or_update_user_profile(sender, instance, created, **kwargs):
+    if created:
+        role = 'admin' if instance.is_superuser else 'staff'
+        UserProfile.objects.get_or_create(
+            user=instance,
+            defaults={
+                'role': role,
+                'full_name': (f"{instance.first_name} {instance.last_name}".strip()) or instance.username
+            }
+        )
+
 

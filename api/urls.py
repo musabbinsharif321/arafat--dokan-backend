@@ -10,7 +10,11 @@ from .views import (
     ExpenseCategoryViewSet,
     ExpenseViewSet,
     HawlatViewSet,
-    DashboardStatsView
+    DashboardStatsView,
+    LoginView,
+    MeView,
+    LogoutView,
+    UserManagementViewSet
 )
 
 router = DefaultRouter()
@@ -23,8 +27,12 @@ router.register(r'transactions', TransactionViewSet, basename='transaction')
 router.register(r'expense-categories', ExpenseCategoryViewSet, basename='expense-category')
 router.register(r'expenses', ExpenseViewSet, basename='expense')
 router.register(r'hawlats', HawlatViewSet, basename='hawlat')
+router.register(r'auth/users', UserManagementViewSet, basename='auth-users')
 
 urlpatterns = [
-    path('', include(router.urls)),
+    path('auth/login/', LoginView.as_view(), name='auth-login'),
+    path('auth/me/', MeView.as_view(), name='auth-me'),
+    path('auth/logout/', LogoutView.as_view(), name='auth-logout'),
     path('dashboard/stats/', DashboardStatsView.as_view(), name='dashboard-stats'),
+    path('', include(router.urls)),
 ]
