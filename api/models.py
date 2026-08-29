@@ -214,9 +214,9 @@ class Hawlat(models.Model):
 
 class UserProfile(models.Model):
     ROLE_CHOICES = [
-        ('admin', 'অ্যাডমিন (Admin)'),
-        ('staff', 'স্টাফ / ম্যানেজার (Staff - No Invoice Edit/Delete)'),
-        ('viewer', 'ভিউয়ার (Viewer - Read Only)'),
+        ('developer', 'ডেভেলপার (Developer - Full Access & Invoice Edit/Delete)'),
+        ('admin', 'অ্যাডমিন (Admin - All Operations Except Invoice Edit/Delete)'),
+        ('staff', 'স্টাফ (Staff - View Only)'),
     ]
 
     user = models.OneToOneField('auth.User', on_delete=models.CASCADE, related_name='profile')
@@ -232,12 +232,12 @@ class UserProfile(models.Model):
 
     @property
     def role_display_badge(self):
-        if self.role == 'admin':
-            return '👑 অ্যাডমিন (সব ক্ষমতা)'
+        if self.role == 'developer':
+            return '🛠️ ডেভেলপার (সর্বোচ্চ ক্ষমতা)'
+        elif self.role == 'admin':
+            return '👑 অ্যাডমিন (ইনভয়েস এডিট/ডিলিট ব্যতীত সব ক্ষমতা)'
         elif self.role == 'staff':
-            return '👔 স্টাফ (ইনভয়েস এডিট/ডিলিট ব্যতীত সব ক্ষমতা)'
-        elif self.role == 'viewer':
-            return '👁️ ভিউয়ার (শুধুমাত্র দেখার অনুমতি)'
+            return '👔 স্টাফ (শুধুমাত্র দেখার অনুমতি)'
         return self.role
 
 
@@ -248,7 +248,7 @@ from django.contrib.auth.models import User
 @receiver(post_save, sender=User)
 def create_or_update_user_profile(sender, instance, created, **kwargs):
     if created:
-        role = 'admin' if instance.is_superuser else 'staff'
+        role = 'developer' if instance.is_superuser else 'admin'
         UserProfile.objects.get_or_create(
             user=instance,
             defaults={

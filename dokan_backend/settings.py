@@ -11,6 +11,19 @@ except Exception:
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Automatically load .env file if present
+_env_file = BASE_DIR / '.env'
+if _env_file.exists():
+    with open(_env_file, 'r', encoding='utf-8') as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _v = _line.split('=', 1)
+                _k = _k.strip()
+                _v = _v.strip().strip('"').strip("'")
+                if _k not in os.environ:
+                    os.environ[_k] = _v
+
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dokan-erp-secret-key-high-performance-key')
 
 DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
@@ -64,15 +77,36 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'dokan_backend.wsgi.application'
 
-# Database configuration: Uses DATABASE_URL on Railway (Postgres), else SQLite
-if HAS_DJ_DB_URL and ('DATABASE_URL' in os.environ or os.environ.get('RAILWAY_ENVIRONMENT')):
+# Database configuration:
+# 1. Production (PostgreSQL): Activated via DATABASE_URL or POSTGRES_DB / DB_NAME env vars (Render, Railway, Supabase, Neon, AWS, Fly, Heroku, etc.)
+# 2. Local Development (SQLite3): Uses local 'db.sqlite3' file when no Postgres env vars are configured.
+
+DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
+
+if HAS_DJ_DB_URL and DATABASE_URL:
+    is_local_pg = 'localhost' in DATABASE_URL or '127.0.0.1' in DATABASE_URL
     DATABASES = {
-        'default': dj_database_url.config(
-            default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
+        'default': dj_database_url.parse(
+            DATABASE_URL,
             conn_max_age=600,
+            conn_health_checks=True,
+            ssl_require=not is_local_pg
         )
     }
+elif os.environ.get('POSTGRES_DB') or os.environ.get('DB_NAME'):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('POSTGRES_DB') or os.environ.get('DB_NAME'),
+            'USER': os.environ.get('POSTGRES_USER') or os.environ.get('DB_USER', 'postgres'),
+            'PASSWORD': os.environ.get('POSTGRES_PASSWORD') or os.environ.get('DB_PASSWORD', ''),
+            'HOST': os.environ.get('POSTGRES_HOST') or os.environ.get('DB_HOST', 'localhost'),
+            'PORT': os.environ.get('POSTGRES_PORT') or os.environ.get('DB_PORT', '5432'),
+            'CONN_MAX_AGE': 600,
+        }
+    }
 else:
+    # Default Local Development Database (SQLite3)
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',

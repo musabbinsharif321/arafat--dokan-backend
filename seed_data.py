@@ -23,37 +23,39 @@ from api.models import (
 def seed():
     print("Seeding Dokan ERP initial database...")
 
-    # 0. Initial Users with 3 Roles (Admin, Staff, Viewer)
-    admin_u, _ = User.objects.get_or_create(username='admin', defaults={'email': 'admin@dokan.com', 'first_name': 'দোকান মালিক (এডমিন)', 'is_staff': True, 'is_superuser': True})
+    # 0. Initial Users with 3 Roles (Developer, Admin, Staff)
+    dev_u, _ = User.objects.get_or_create(username='developer', defaults={'email': 'dev@dokan.com', 'first_name': 'সিস্টেম ডেভেলপার', 'is_staff': True, 'is_superuser': True})
+    dev_u.set_password('developer123')
+    dev_u.is_staff = True
+    dev_u.is_superuser = True
+    dev_u.save()
+    p_dev, _ = UserProfile.objects.get_or_create(user=dev_u)
+    p_dev.role = 'developer'
+    p_dev.full_name = 'সিস্টেম ডেভেলপার'
+    p_dev.phone = '01711000000'
+    p_dev.save()
+
+    admin_u, _ = User.objects.get_or_create(username='admin', defaults={'email': 'admin@dokan.com', 'first_name': 'দোকান এডমিন', 'is_staff': True, 'is_superuser': False})
     admin_u.set_password('admin123')
     admin_u.is_staff = True
-    admin_u.is_superuser = True
+    admin_u.is_superuser = False
     admin_u.save()
     p_admin, _ = UserProfile.objects.get_or_create(user=admin_u)
     p_admin.role = 'admin'
-    p_admin.full_name = 'দোকান মালিক (এডমিন)'
-    p_admin.phone = '01711000000'
+    p_admin.full_name = 'দোকান এডমিন'
+    p_admin.phone = '01711000001'
     p_admin.save()
 
-    staff_u, _ = User.objects.get_or_create(username='staff', defaults={'email': 'staff@dokan.com', 'first_name': 'স্টাফ ম্যানেজার', 'is_staff': False, 'is_superuser': False})
+    staff_u, _ = User.objects.get_or_create(username='staff', defaults={'email': 'staff@dokan.com', 'first_name': 'স্টাফ মেম্বার', 'is_staff': False, 'is_superuser': False})
     staff_u.set_password('staff123')
     staff_u.save()
     p_staff, _ = UserProfile.objects.get_or_create(user=staff_u)
     p_staff.role = 'staff'
-    p_staff.full_name = 'স্টাফ ম্যানেজার'
-    p_staff.phone = '01711000001'
+    p_staff.full_name = 'স্টাফ মেম্বার'
+    p_staff.phone = '01711000002'
     p_staff.save()
 
-    viewer_u, _ = User.objects.get_or_create(username='viewer', defaults={'email': 'viewer@dokan.com', 'first_name': 'রিপোর্ট ভিউয়ার', 'is_staff': False, 'is_superuser': False})
-    viewer_u.set_password('viewer123')
-    viewer_u.save()
-    p_viewer, _ = UserProfile.objects.get_or_create(user=viewer_u)
-    p_viewer.role = 'viewer'
-    p_viewer.full_name = 'রিপোর্ট ভিউয়ার'
-    p_viewer.phone = '01711000002'
-    p_viewer.save()
-
-    print("Users initialized: admin (Full Access), staff (No Invoice Edit/Delete), viewer (Read-Only).")
+    print("Users initialized: developer (Full Access & Invoice Edit/Delete), admin (All except Invoice Edit/Delete), staff (View Only).")
 
     # 1. Shop Settings
     settings, created = ShopSettings.objects.get_or_create(id=1, defaults={

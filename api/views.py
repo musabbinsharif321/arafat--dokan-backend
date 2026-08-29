@@ -164,20 +164,20 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         role = get_user_role(request.user)
-        if role in ['staff', 'viewer']:
-            return Response({'detail': 'স্টাফ বা ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস এডিট বা পরিবর্তন করার অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        if role != 'developer':
+            return Response({'detail': 'ইনভয়েস বা লেনদেন সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         role = get_user_role(request.user)
-        if role in ['staff', 'viewer']:
-            return Response({'detail': 'স্টাফ বা ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস এডিট বা পরিবর্তন করার অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        if role != 'developer':
+            return Response({'detail': 'ইনভয়েস বা লেনদেন সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
         return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         role = get_user_role(request.user)
-        if role in ['staff', 'viewer']:
-            return Response({'detail': 'স্টাফ বা ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস মুছে ফেলার (Delete) অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        if role != 'developer':
+            return Response({'detail': 'ইনভয়েস বা লেনদেন মুছে ফেলার (Delete) অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
@@ -362,22 +362,27 @@ class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        username_or_phone = request.data.get('username', '').strip()
+        identifier = (
+            request.data.get('email') or 
+            request.data.get('username') or 
+            request.data.get('identifier') or 
+            ''
+        ).strip()
         password = request.data.get('password', '').strip()
 
-        if not username_or_phone or not password:
-            return Response({'detail': 'ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।'}, status=status.HTTP_400_BAD_REQUEST)
+        if not identifier or not password:
+            return Response({'detail': 'ইমেইল/ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 1. Lookup by username
-        user = User.objects.filter(username__iexact=username_or_phone).first()
+        # 1. Lookup by Email
+        user = User.objects.filter(email__iexact=identifier).first()
 
-        # 2. Lookup by email
+        # 2. Lookup by Username
         if not user:
-            user = User.objects.filter(email__iexact=username_or_phone).first()
+            user = User.objects.filter(username__iexact=identifier).first()
 
-        # 3. Lookup by profile phone
+        # 3. Lookup by Profile Phone
         if not user:
-            profile = UserProfile.objects.filter(phone=username_or_phone).first()
+            profile = UserProfile.objects.filter(phone=identifier).first()
             if profile:
                 user = profile.user
 
@@ -393,7 +398,7 @@ class LoginView(APIView):
                 'message': 'সফলভাবে লগইন হয়েছে।'
             }, status=status.HTTP_200_OK)
 
-        return Response({'detail': 'ভুল ইউজারনেম অথবা পাসওয়ার্ড! সঠিক তথ্য দিন।'}, status=status.HTTP_401_UNAUTHORIZED)
+        return Response({'detail': 'ভুল ইমেইল/ইউজারনেম অথবা পাসওয়ার্ড! সঠিক তথ্য দিন।'}, status=status.HTTP_401_UNAUTHORIZED)
 
 
 class MeView(APIView):
@@ -445,9 +450,17 @@ class UserManagementViewSet(viewsets.ModelViewSet):
             email=email,
             first_name=full_name
         )
-        if role == 'admin':
+        if role == 'developer':
             user.is_staff = True
             user.is_superuser = True
+            user.save()
+        elif role == 'admin':
+            user.is_staff = True
+            user.is_superuser = False
+            user.save()
+        else:
+            user.is_staff = False
+            user.is_superuser = False
             user.save()
 
         profile, _ = UserProfile.objects.get_or_create(user=user)
@@ -476,8 +489,11 @@ class UserManagementViewSet(viewsets.ModelViewSet):
             user.first_name = full_name
 
         if role:
-            if role == 'admin':
+            if role == 'developer':
                 user.is_superuser = True
+                user.is_staff = True
+            elif role == 'admin':
+                user.is_superuser = False
                 user.is_staff = True
             else:
                 user.is_superuser = False

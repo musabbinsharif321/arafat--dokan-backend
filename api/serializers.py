@@ -697,21 +697,21 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'profile', 'role', 'role_display', 'role_badge', 'full_name', 'phone', 'date_joined']
 
     def get_role(self, obj):
-        if obj.is_superuser:
-            return 'admin'
-        if hasattr(obj, 'profile') and obj.profile:
+        if hasattr(obj, 'profile') and obj.profile and obj.profile.role:
             return obj.profile.role
+        if obj.is_superuser:
+            return 'developer'
         return 'staff'
 
     def get_role_display(self, obj):
         if hasattr(obj, 'profile') and obj.profile:
             return obj.profile.get_role_display()
-        return 'অ্যাডমিন' if obj.is_superuser else 'স্টাফ'
+        return 'ডেভেলপার' if obj.is_superuser else 'স্টাফ'
 
     def get_role_badge(self, obj):
         if hasattr(obj, 'profile') and obj.profile:
             return obj.profile.role_display_badge
-        return '👑 অ্যাডমিন' if obj.is_superuser else '👔 স্টাফ'
+        return '🛠️ ডেভেলপার' if obj.is_superuser else '👔 স্টাফ'
 
     def get_full_name(self, obj):
         if hasattr(obj, 'profile') and obj.profile and obj.profile.full_name:
