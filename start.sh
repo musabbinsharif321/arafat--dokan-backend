@@ -11,8 +11,7 @@ python manage.py collectstatic --noinput
 # 2. Run database migrations
 python manage.py migrate
 
-# 3. Seed initial essential roles and data
-python seed_data.py
+
 
 # 4. Start production Gunicorn WSGI server
 exec gunicorn dokan_backend.wsgi:application \
