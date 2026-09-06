@@ -26,7 +26,8 @@ def recalculate_product_stock_and_cost(product_or_id):
     )
 
     if not items.exists():
-        # Keep product opening stock/purchase price intact if no transaction items exist
+        product.stock = Decimal('0.00')
+        product.save(update_fields=['stock'])
         return product
 
     running_stock = 0.0

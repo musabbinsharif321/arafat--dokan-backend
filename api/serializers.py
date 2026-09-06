@@ -154,6 +154,16 @@ def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None
             return prod
 
         if category_head == 'সিমেন্ট':
+            is_item_opc = 'opc' in cleaned_norm
+            is_item_pcc = 'pcc' in cleaned_norm
+            is_prod_opc = 'opc' in p_combined
+            is_prod_pcc = 'pcc' in p_combined
+
+            # If either item or existing product has OPC or PCC, they must strictly match
+            if (is_item_opc or is_item_pcc) or (is_prod_opc or is_prod_pcc):
+                if is_item_opc != is_prod_opc or is_item_pcc != is_prod_pcc:
+                    continue
+
             if matched_brand_tokens:
                 if any(alias in p_combined for alias in matched_brand_tokens):
                     return prod
@@ -410,6 +420,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             validated_data['party_phone'] = party.phone
 
         transaction = Transaction.objects.create(**validated_data)
+        is_active = transaction.status not in ['pending', 'draft', 'cancelled', 'rejected']
 
         affected_product_ids = set()
 
@@ -421,7 +432,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             prod = t_item.product
             if not prod and t_item.product_name:
                 prod = Product.objects.filter(name__iexact=t_item.product_name.strip()).first()
-                if not prod:
+                if not prod and is_active:
                     prod = find_or_create_product_for_purchase(
                         item_name=t_item.product_name,
                         unit=t_item.unit,
@@ -432,14 +443,12 @@ class TransactionSerializer(serializers.ModelSerializer):
                     t_item.product = prod
                     t_item.save(update_fields=['product'])
 
-            if prod:
+            if prod and is_active:
                 affected_product_ids.add(prod.id)
                 # Update selling price if specified in purchase
                 if transaction.transaction_type == 'purchase' and sell_price_input is not None and float(sell_price_input) > 0:
                     prod.sell_price = round(float(sell_price_input), 2)
                     prod.save(update_fields=['sell_price'])
-
-        is_active = transaction.status not in ['pending', 'draft', 'cancelled', 'rejected']
 
         if party and is_active:
             if transaction.transaction_type == 'sale':
@@ -532,6 +541,8 @@ class TransactionSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         instance.save()
 
+        new_is_active = instance.status not in ['pending', 'draft', 'cancelled', 'rejected']
+
         # 4. If items are provided, create new items
         if items_data is not None:
             for item_data in items_data:
@@ -542,7 +553,7 @@ class TransactionSerializer(serializers.ModelSerializer):
 
                 if not prod and t_item.product_name:
                     prod = Product.objects.filter(name__iexact=t_item.product_name.strip()).first()
-                    if not prod:
+                    if not prod and new_is_active:
                         prod = find_or_create_product_for_purchase(
                             item_name=t_item.product_name,
                             unit=t_item.unit,
@@ -553,14 +564,32 @@ class TransactionSerializer(serializers.ModelSerializer):
                         t_item.product = prod
                         t_item.save(update_fields=['product'])
 
-                if prod:
+                if prod and new_is_active:
                     affected_product_ids.add(prod.id)
                     if instance.transaction_type == 'purchase' and sell_price_input is not None and float(sell_price_input) > 0:
                         prod.sell_price = round(float(sell_price_input), 2)
                         prod.save(update_fields=['sell_price'])
 
+        # 4b. When transitioning from unapproved (pending/draft) to active (approved),
+        # ensure any unlinked items now create/find products and get added to affected_product_ids
+        if not old_is_active and new_is_active:
+            for it in instance.items.all():
+                p = it.product
+                if not p and it.product_name:
+                    p = Product.objects.filter(name__iexact=it.product_name.strip()).first()
+                    if not p:
+                        p = find_or_create_product_for_purchase(
+                            item_name=it.product_name,
+                            unit=it.unit,
+                            price=it.price
+                        )
+                    if p:
+                        it.product = p
+                        it.save(update_fields=['product'])
+                if p:
+                    affected_product_ids.add(p.id)
+
         # 5. Apply new transaction effect on current/updated party ONLY if new transaction is active
-        new_is_active = instance.status not in ['pending', 'draft', 'cancelled', 'rejected']
         if instance.party_id and new_is_active:
             new_party = Party.objects.filter(id=instance.party_id).first()
             if new_party:

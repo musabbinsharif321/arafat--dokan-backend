@@ -80,7 +80,10 @@ class RoleBasedAccessPermission(permissions.BasePermission):
             is_transaction = 'transaction' in str(view_name).lower() or getattr(view, 'is_transaction_view', False)
 
             if is_transaction:
+                action = getattr(view, 'action', '')
                 if request.method in permissions.SAFE_METHODS:
+                    return True
+                if action == 'approve' and request.method == 'POST':
                     return True
                 raise PermissionDenied('ইনভয়েস বা লেনদেন সম্পাদনা (Edit) অথবা মুছে ফেলার (Delete) অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।')
 

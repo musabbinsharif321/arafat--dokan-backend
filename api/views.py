@@ -183,8 +183,8 @@ class TransactionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         role = get_user_role(request.user)
-        if role == 'viewer':
-            return Response({'detail': 'ভিউয়ার হিসেবে আপনার কোনো ইনভয়েস অনুমোদন করার অনুমতি নেই।'}, status=status.HTTP_403_FORBIDDEN)
+        if role not in ['admin', 'developer']:
+            return Response({'detail': 'ইনভয়েস অনুমোদন (Approve) করার অনুমতি শুধুমাত্র অ্যাডমিন (Admin) বা ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
         
         instance = self.get_object()
         if instance.status in ['completed', 'approved']:
@@ -235,6 +235,12 @@ class TransactionViewSet(viewsets.ModelViewSet):
                 old_party.save()
 
         affected_product_ids = set(instance.items.exclude(product__isnull=True).values_list('product_id', flat=True))
+        for item in instance.items.filter(product__isnull=True):
+            if item.product_name:
+                matched_p = Product.objects.filter(name__iexact=item.product_name.strip()).first()
+                if matched_p:
+                    affected_product_ids.add(matched_p.id)
+
         instance.delete()
 
         for pid in affected_product_ids:
