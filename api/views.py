@@ -205,8 +205,8 @@ class PartyViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             if clear_existing and default_party:
                 Transaction.objects.filter(
-                    party=default_party,
-                    notes__icontains='"isHistoricalLedger": true'
+                    Q(party=default_party) | Q(party_name__iexact=default_party.name),
+                    Q(notes__icontains='isHistoricalLedger') | Q(invoice_no__icontains=f"-LEG-{default_party.id}-") | Q(invoice_no__icontains='-LEG-')
                 ).delete()
 
             if group_by_date:
@@ -949,11 +949,13 @@ class DashboardStatsView(APIView):
         now = timezone.now()
         first_day_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # Sales aggregates (excluding pending / unapproved)
-        sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
+        # Sales aggregates (excluding pending / unapproved and historical ledger import)
+        sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
         total_sales = sales_qs.aggregate(total=Sum('total_amount'))['total'] or 0
         sales_paid = sales_qs.aggregate(total=Sum('paid_amount'))['total'] or 0
-        total_dues = sales_qs.aggregate(total=Sum('due_amount'))['total'] or 0
+        # Customer total due should reflect actual Party accounts
+        customer_dues = Party.objects.filter(party_type='customer').aggregate(total=Sum('total_due'))['total'] or 0
+        total_dues = customer_dues
         monthly_sales = sales_qs.filter(created_at__gte=first_day_of_month).aggregate(total=Sum('total_amount'))['total'] or 0
 
         # Purchase aggregates (excluding pending / unapproved)

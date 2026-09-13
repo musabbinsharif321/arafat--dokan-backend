@@ -239,10 +239,10 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
     from django.db.models import Sum
     from .models import Transaction, Expense, Bank
 
-    sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
-    purchases_qs = Transaction.objects.filter(transaction_type='purchase').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
-    p_in_qs = Transaction.objects.filter(transaction_type='payment_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
-    p_out_qs = Transaction.objects.filter(transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
+    sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
+    purchases_qs = Transaction.objects.filter(transaction_type='purchase').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
+    p_in_qs = Transaction.objects.filter(transaction_type='payment_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
+    p_out_qs = Transaction.objects.filter(transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     exp_qs = Expense.objects.all()
 
     if exclude_tx_id:
