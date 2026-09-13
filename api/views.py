@@ -780,6 +780,14 @@ class TransactionViewSet(viewsets.ModelViewSet):
                 Q(cheque_number__icontains=search)
             )
 
+        # Historical ledger entries should strictly only be visible in party-specific history/ledger views
+        # Never in general orders, sales lists, transactions lists, or dashboards
+        include_historical = self.request.query_params.get('include_historical')
+        if include_historical == 'false':
+            qs = qs.exclude(notes__contains='isHistoricalLedger')
+        elif include_historical != 'true' and not party_id:
+            qs = qs.exclude(notes__contains='isHistoricalLedger')
+
         return qs
 
     def update(self, request, *args, **kwargs):
