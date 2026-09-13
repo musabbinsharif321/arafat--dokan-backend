@@ -1,12 +1,15 @@
 from rest_framework import viewsets, status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db.models import Sum, Count, F, Q
+from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
+from decimal import Decimal
 
 from .permissions import RoleBasedAccessPermission, IsAdminUserOnly, get_user_role
 from .models import (
@@ -74,6 +77,75 @@ class PartyViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    @action(detail=False, methods=['post'], url_path='bulk-import')
+    def bulk_import(self, request):
+        parties_data = request.data.get('parties', [])
+        if not isinstance(parties_data, list):
+            return Response({'error': 'parties must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+        created_count = 0
+        updated_count = 0
+        errors = []
+
+        with transaction.atomic():
+            for idx, item in enumerate(parties_data):
+                phone = str(item.get('phone', '')).strip()
+                name = str(item.get('name', '')).strip()
+                if not name:
+                    errors.append(f"রো #{idx + 1}: কাস্টমার/সাপ্লায়ারের নাম প্রদান করা আবশ্যক।")
+                    continue
+                if not phone:
+                    phone = f"01000{idx+1:06d}"
+
+                party_type = item.get('party_type', 'customer')
+                if party_type not in ['customer', 'supplier', 'engineer', 'both']:
+                    party_type = 'customer'
+
+                business_name = str(item.get('business_name', '') or '').strip()
+                address = str(item.get('address', '') or '').strip()
+
+                try:
+                    opening_balance = Decimal(str(item.get('opening_balance', 0) or 0))
+                except Exception:
+                    opening_balance = Decimal('0.00')
+
+                try:
+                    total_due = Decimal(str(item.get('total_due', opening_balance) or opening_balance))
+                except Exception:
+                    total_due = opening_balance
+
+                party = Party.objects.filter(phone=phone).first()
+                if party:
+                    party.name = name
+                    if business_name:
+                        party.business_name = business_name
+                    if address:
+                        party.address = address
+                    if 'opening_balance' in item:
+                        party.opening_balance = opening_balance
+                    if 'total_due' in item or 'opening_balance' in item:
+                        party.total_due = total_due
+                    party.save()
+                    updated_count += 1
+                else:
+                    Party.objects.create(
+                        name=name,
+                        phone=phone,
+                        party_type=party_type,
+                        business_name=business_name,
+                        address=address,
+                        opening_balance=opening_balance,
+                        total_due=total_due
+                    )
+                    created_count += 1
+
+        return Response({
+            'success': True,
+            'created_count': created_count,
+            'updated_count': updated_count,
+            'errors': errors
+        }, status=status.HTTP_200_OK)
+
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by('name')
     serializer_class = CategorySerializer
@@ -122,6 +194,93 @@ class ProductViewSet(viewsets.ModelViewSet):
             if p_log and p_log['logs']:
                 all_logs.append(p_log)
         return Response(all_logs, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='bulk-import')
+    def bulk_import(self, request):
+        products_data = request.data.get('products', [])
+        if not isinstance(products_data, list):
+            return Response({'error': 'products must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+        created_count = 0
+        updated_count = 0
+        errors = []
+
+        with transaction.atomic():
+            for idx, item in enumerate(products_data):
+                name = str(item.get('name', '')).strip()
+                if not name:
+                    errors.append(f"রো #{idx + 1}: পণ্যের নাম প্রদান করা আবশ্যক।")
+                    continue
+
+                category_name = str(item.get('category_name', '') or item.get('category', '') or '').strip()
+                category = None
+                if category_name:
+                    category, _ = Category.objects.get_or_create(name=category_name)
+
+                try:
+                    stock = Decimal(str(item.get('stock', 0) or 0))
+                except Exception:
+                    stock = Decimal('0.00')
+
+                try:
+                    min_stock = Decimal(str(item.get('min_stock', 5) or 5))
+                except Exception:
+                    min_stock = Decimal('5.00')
+
+                try:
+                    purchase_price = Decimal(str(item.get('purchase_price', 0) or 0))
+                except Exception:
+                    purchase_price = Decimal('0.00')
+
+                try:
+                    sell_price = Decimal(str(item.get('sell_price', 0) or 0))
+                except Exception:
+                    sell_price = Decimal('0.00')
+
+                unit = str(item.get('unit', 'পিস') or 'পিস').strip()
+                sku = str(item.get('sku', '') or '').strip() or None
+                brand = str(item.get('brand', '') or '').strip()
+
+                product = None
+                if sku:
+                    product = Product.objects.filter(sku=sku).first()
+                if not product:
+                    product = Product.objects.filter(name__iexact=name).first()
+
+                if product:
+                    product.stock = stock
+                    product.purchase_price = purchase_price
+                    product.sell_price = sell_price
+                    if category:
+                        product.category = category
+                        product.category_name = category.name
+                    if unit:
+                        product.unit = unit
+                    if brand:
+                        product.brand = brand
+                    product.save()
+                    updated_count += 1
+                else:
+                    Product.objects.create(
+                        name=name,
+                        sku=sku,
+                        category=category,
+                        category_name=category.name if category else '',
+                        stock=stock,
+                        min_stock=min_stock,
+                        unit=unit,
+                        purchase_price=purchase_price,
+                        sell_price=sell_price,
+                        brand=brand
+                    )
+                    created_count += 1
+
+        return Response({
+            'success': True,
+            'created_count': created_count,
+            'updated_count': updated_count,
+            'errors': errors
+        }, status=status.HTTP_200_OK)
 
 class BankViewSet(viewsets.ModelViewSet):
     queryset = Bank.objects.all().order_by('name')
@@ -272,6 +431,52 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             )
 
         return qs
+
+    @action(detail=False, methods=['post'], url_path='bulk-import')
+    def bulk_import(self, request):
+        expenses_data = request.data.get('expenses', [])
+        if not isinstance(expenses_data, list):
+            return Response({'error': 'expenses must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+        created_count = 0
+        errors = []
+
+        with transaction.atomic():
+            for idx, item in enumerate(expenses_data):
+                title = str(item.get('title', '')).strip()
+                if not title:
+                    errors.append(f"রো #{idx + 1}: খরচের বিবরণ প্রদান করা আবশ্যক।")
+                    continue
+
+                category_name = str(item.get('category_name', '') or item.get('category', 'সাধারণ খরচ') or 'সাধারণ খরচ').strip()
+                cat, _ = ExpenseCategory.objects.get_or_create(name=category_name)
+
+                try:
+                    amount = Decimal(str(item.get('amount', 0) or 0))
+                except Exception:
+                    amount = Decimal('0.00')
+
+                date_str = item.get('date')
+                payment_method = str(item.get('payment_method', 'ক্যাশ') or 'ক্যাশ').strip()
+
+                expense = Expense(
+                    title=title,
+                    category=cat,
+                    category_name=cat.name,
+                    amount=amount,
+                    payment_method=payment_method,
+                    notes=item.get('notes', '')
+                )
+                if date_str:
+                    expense.date = date_str
+                expense.save()
+                created_count += 1
+
+        return Response({
+            'success': True,
+            'created_count': created_count,
+            'errors': errors
+        }, status=status.HTTP_200_OK)
 
 class DashboardStatsView(APIView):
     """

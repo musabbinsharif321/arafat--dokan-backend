@@ -18,12 +18,28 @@ class ShopSettingsSerializer(serializers.ModelSerializer):
         model = ShopSettings
         fields = '__all__'
 
+BN_TO_EN_DIGITS = str.maketrans('০১২৩৪৫৬৭৮৯', '0123456789')
+
+def normalize_bengali_digits(val):
+    if val is None:
+        return val
+    return str(val).translate(BN_TO_EN_DIGITS)
+
 class PartySerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
     
     class Meta:
         model = Party
         fields = '__all__'
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            mutable_data = data.copy()
+            for key in ['phone', 'alt_phone', 'opening_balance', 'credit_limit', 'discount_percent', 'credit_days', 'postcode', 'nid', 'tin_number']:
+                if key in mutable_data and mutable_data[key] is not None:
+                    mutable_data[key] = normalize_bengali_digits(mutable_data[key])
+            return super().to_internal_value(mutable_data)
+        return super().to_internal_value(data)
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -48,7 +64,8 @@ class RoundedDecimalField(serializers.DecimalField):
         if data is None or data == '':
             return None
         try:
-            val = Decimal(str(data))
+            cleaned = normalize_bengali_digits(data)
+            val = Decimal(str(cleaned))
             rounded_val = val.quantize(Decimal('0.01'))
             return super().to_internal_value(rounded_val)
         except Exception:
@@ -653,26 +670,33 @@ class ExpenseSerializer(serializers.ModelSerializer):
         pay_method = (attrs.get('payment_method') or (self.instance.payment_method if self.instance else 'cash') or 'cash').lower()
 
         if amt > 0:
-            exclude_id = self.instance.id if self.instance else None
-            cash_bal, bank_bal = get_available_balances(exclude_expense_id=exclude_id)
-            is_bank = any(b in pay_method for b in ['bank', 'cheque', 'mobile', 'bkash'])
-            if is_bank:
-                target_bank = attrs.get('bank_account') or (self.instance.bank_account if self.instance else None)
-                if target_bank:
-                    target_bank_bal = target_bank.balance
-                    if amt > target_bank_bal:
+            is_adjustment = (
+                any(k in pay_method for k in ['adjust', 'সমন্বয়', 'due']) or
+                'সমন্বয়' in cat_name or
+                'আয়' in cat_name or
+                'কমিশন আয়' in cat_name
+            )
+            if not is_adjustment:
+                exclude_id = self.instance.id if self.instance else None
+                cash_bal, bank_bal = get_available_balances(exclude_expense_id=exclude_id)
+                is_bank = any(b in pay_method for b in ['bank', 'cheque', 'mobile', 'bkash'])
+                if is_bank:
+                    target_bank = attrs.get('bank_account') or (self.instance.bank_account if self.instance else None)
+                    if target_bank:
+                        target_bank_bal = target_bank.balance
+                        if amt > target_bank_bal:
+                            raise serializers.ValidationError({
+                                'amount': f"পর্যাপ্ত ব্যাংক ব্যালেন্স নেই! (নির্বাচিত '{target_bank.name}' একাউন্ট ব্যালেন্স: ৳ {target_bank_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে এই ব্যাংক একাউন্টে ব্যালেন্স জমা করুন।"
+                            })
+                    elif amt > bank_bal:
                         raise serializers.ValidationError({
-                            'amount': f"পর্যাপ্ত ব্যাংক ব্যালেন্স নেই! (নির্বাচিত '{target_bank.name}' একাউন্ট ব্যালেন্স: ৳ {target_bank_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে এই ব্যাংক একাউন্টে ব্যালেন্স জমা করুন।"
+                            'amount': f"পর্যাপ্ত ব্যাংক ব্যালেন্স নেই! (বর্তমান ব্যাংক ব্যালেন্স: ৳ {bank_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে ব্যাংকে ব্যালেন্স জমা করুন।"
                         })
-                elif amt > bank_bal:
-                    raise serializers.ValidationError({
-                        'amount': f"পর্যাপ্ত ব্যাংক ব্যালেন্স নেই! (বর্তমান ব্যাংক ব্যালেন্স: ৳ {bank_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে ব্যাংকে ব্যালেন্স জমা করুন।"
-                    })
-            else:
-                if amt > cash_bal:
-                    raise serializers.ValidationError({
-                        'amount': f"পর্যাপ্ত নগদ ক্যাশ ব্যালেন্স নেই! (বর্তমান ক্যাশ ব্যালেন্স: ৳ {cash_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে ক্যাশে ব্যালেন্স জমা করুন।"
-                    })
+                else:
+                    if amt > cash_bal:
+                        raise serializers.ValidationError({
+                            'amount': f"পর্যাপ্ত নগদ ক্যাশ ব্যালেন্স নেই! (বর্তমান ক্যাশ ব্যালেন্স: ৳ {cash_bal:,.2f}, খরচ দিতে চাচ্ছেন: ৳ {amt:,.2f})। অনুগ্রহ করে আগে ক্যাশে ব্যালেন্স জমা করুন।"
+                        })
         return attrs
 
     def create(self, validated_data):
