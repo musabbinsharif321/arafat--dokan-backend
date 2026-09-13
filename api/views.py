@@ -1,3 +1,5 @@
+import ipaddress
+import ipaddress
 from rest_framework import viewsets, status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -91,18 +93,21 @@ class PartyViewSet(viewsets.ModelViewSet):
             for idx, item in enumerate(parties_data):
                 phone = str(item.get('phone', '')).strip()
                 name = str(item.get('name', '')).strip()
+                business_name = str(item.get('business_name', '')).strip()
+                address = str(item.get('address', '')).strip()
                 if not name:
                     errors.append(f"রো #{idx + 1}: কাস্টমার/সাপ্লায়ারের নাম প্রদান করা আবশ্যক।")
                     continue
                 if not phone:
                     phone = f"01000{idx+1:06d}"
+                    party = Party.objects.filter(name=name, address=address).first() if address else None
+                else:
+                    party = Party.objects.filter(phone=phone).first()
 
                 party_type = item.get('party_type', 'customer')
                 if party_type not in ['customer', 'supplier', 'engineer', 'both']:
                     party_type = 'customer'
 
-                business_name = str(item.get('business_name', '') or '').strip()
-                address = str(item.get('address', '') or '').strip()
 
                 try:
                     opening_balance = Decimal(str(item.get('opening_balance', 0) or 0))
@@ -114,7 +119,6 @@ class PartyViewSet(viewsets.ModelViewSet):
                 except Exception:
                     total_due = opening_balance
 
-                party = Party.objects.filter(phone=phone).first()
                 if party:
                     party.name = name
                     if business_name:
@@ -143,6 +147,463 @@ class PartyViewSet(viewsets.ModelViewSet):
             'success': True,
             'created_count': created_count,
             'updated_count': updated_count,
+            'errors': errors
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='bulk-import-ledger')
+    def bulk_import_ledger(self, request):
+        """
+        Bulk imports historical customer ledger entries from Excel / CSV.
+        Guarantees ZERO adverse effects on live inventory stock, cash balances, or bank accounts.
+        Just creates ledger transactions and items, and updates the customer's total_sales and total_due.
+        """
+        import json
+        from datetime import datetime, date
+
+        def parse_date(val):
+            if not val:
+                return timezone.now()
+            if isinstance(val, (datetime, timezone.datetime)):
+                return timezone.make_aware(val) if timezone.is_naive(val) else val
+            if isinstance(val, date):
+                return timezone.make_aware(datetime.combine(val, datetime.min.time()))
+            try:
+                fval = float(val)
+                if 20000 < fval < 70000:
+                    dt = datetime(1899, 12, 30) + timedelta(days=fval)
+                    return timezone.make_aware(dt)
+            except (ValueError, TypeError):
+                pass
+            val_str = str(val).strip()
+            bn_to_en = str.maketrans('০১২৩৪৫৬৭৮৯', '0123456789')
+            val_str = val_str.translate(bn_to_en)
+            for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y', '%Y-%m-%d %H:%M:%S', '%d-%m-%Y %H:%M:%S']:
+                try:
+                    raw_p = val_str.split('T')[0] if ('T' in val_str and fmt in ['%Y-%m-%d', '%d-%m-%Y']) else val_str
+                    dt = datetime.strptime(raw_p, fmt)
+                    return timezone.make_aware(dt)
+                except Exception:
+                    continue
+            return timezone.now()
+
+        entries_data = request.data.get('entries', [])
+        default_party_id = request.data.get('party_id')
+        clear_existing = request.data.get('clear_existing', False)
+        group_by_date = request.data.get('group_by_date', True)  # Default True: combine same date items into one invoice
+
+        if not isinstance(entries_data, list):
+            return Response({'error': 'entries must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+        default_party = None
+        if default_party_id:
+            default_party = Party.objects.filter(id=default_party_id).first()
+
+        created_transactions_count = 0
+        affected_parties = set()
+        errors = []
+
+        with transaction.atomic():
+            if clear_existing and default_party:
+                Transaction.objects.filter(
+                    party=default_party,
+                    notes__icontains='"isHistoricalLedger": true'
+                ).delete()
+
+            if group_by_date:
+                # Group sales entries by (party_key, date_key) so they become 1 invoice with multiple items
+                # And process payments individually or grouped
+                grouped_orders = {}
+                direct_receipts = []
+
+                for idx, item in enumerate(entries_data):
+                    # 1. Resolve Party
+                    party = None
+                    p_id = item.get('party_id')
+                    if p_id:
+                        party = Party.objects.filter(id=p_id).first()
+                    if not party and default_party:
+                        party = default_party
+
+                    p_phone = str(item.get('phone', '') or item.get('customer_phone', '')).strip()
+                    p_name = str(item.get('name', '') or item.get('customer_name', '') or item.get('party_name', '')).strip()
+
+                    if not party and p_phone:
+                        party = Party.objects.filter(phone=p_phone).first()
+                    if not party and p_name:
+                        clean_p_name = p_name.strip()
+                        party = Party.objects.filter(name__iexact=clean_p_name).first()
+                        if not party:
+                            party = Party.objects.filter(name__icontains=clean_p_name).first()
+
+                    if not party:
+                        if p_name:
+                            party = Party.objects.create(
+                                name=p_name,
+                                phone=p_phone or f"01000{Party.objects.count() + 1:06d}",
+                                party_type='customer',
+                                address=str(item.get('address', '')),
+                                opening_balance=Decimal('0.00'),
+                                total_due=Decimal('0.00'),
+                                total_sales=Decimal('0.00')
+                            )
+                        else:
+                            errors.append(f"রো #{idx + 1}: কাস্টমার চিহ্নিত করা যায়নি।")
+                            continue
+
+                    affected_parties.add(party)
+
+                    # Parse values
+                    entry_date = parse_date(item.get('date') or item.get('created_at'))
+                    d_str = entry_date.strftime('%Y%m%d')
+                    desc = str(item.get('description') or item.get('particulars') or item.get('product_name') or '').strip()
+                    note_text = str(item.get('note') or item.get('notes') or item.get('remarks') or '').strip()
+                    inv_no = str(item.get('invoice_no') or item.get('voucher_no') or item.get('ref_no') or '').strip()
+
+                    method = str(item.get('payment_method') or 'cash').strip().lower()
+                    if 'bank' in method or 'ব্যাংক' in method:
+                        method = 'bank'
+                    elif 'cheque' in method or 'চেক' in method:
+                        method = 'cheque'
+                    elif 'bkash' in method or 'nagad' in method or 'মোবাইল' in method:
+                        method = 'mobile_banking'
+                    else:
+                        method = 'cash'
+
+                    try:
+                        debit = Decimal(str(item.get('debit', 0) or item.get('bill_amount', 0) or item.get('sale_amount', 0) or 0))
+                    except Exception:
+                        debit = Decimal('0.00')
+
+                    try:
+                        credit = Decimal(str(item.get('credit', 0) or item.get('paid_amount', 0) or item.get('deposit_amount', 0) or 0))
+                    except Exception:
+                        credit = Decimal('0.00')
+
+                    try:
+                        qty = Decimal(str(item.get('quantity', 1) or 1))
+                    except Exception:
+                        qty = Decimal('1.00')
+
+                    try:
+                        rate = Decimal(str(item.get('rate', 0) or item.get('price', 0) or 0))
+                    except Exception:
+                        rate = Decimal('0.00')
+
+                    unit = str(item.get('unit') or 'টি').strip()
+
+                    # Opening Balance Check
+                    is_opening = (
+                        'opening' in desc.lower() or
+                        'প্রারম্ভিক' in desc or
+                        'পূর্বের জের' in desc or
+                        'পূর্বের বকেয়া' in desc or
+                        'পূর্বের বকেয়া' in desc or
+                        item.get('type') == 'opening'
+                    )
+                    if is_opening:
+                        op_amt = debit if debit > 0 else (credit if credit > 0 else Decimal('0.00'))
+                        if op_amt > 0:
+                            party.opening_balance = op_amt
+                            party.save(update_fields=['opening_balance'])
+                        continue
+
+                    # If this row is a sale item (debit > 0)
+                    if debit > 0:
+                        group_key = f"{party.id}_{d_str}_{inv_no}"
+                        if group_key not in grouped_orders:
+                            grouped_orders[group_key] = {
+                                'party': party,
+                                'date': entry_date,
+                                'd_str': d_str,
+                                'inv_no': inv_no,
+                                'method': method,
+                                'total_debit': Decimal('0.00'),
+                                'total_credit': Decimal('0.00'),
+                                'items': [],
+                                'notes': []
+                            }
+                        grouped_orders[group_key]['total_debit'] += debit
+                        grouped_orders[group_key]['total_credit'] += credit
+                        grouped_orders[group_key]['items'].append({
+                            'desc': desc or 'পণ্য বিক্রয়',
+                            'qty': qty if qty > 0 else Decimal('1.00'),
+                            'rate': rate if rate > 0 else debit,
+                            'unit': unit,
+                            'total': debit
+                        })
+                        if note_text:
+                            grouped_orders[group_key]['notes'].append(note_text)
+
+                    # If this row is a payment in (credit > 0 without debit)
+                    elif credit > 0:
+                        direct_receipts.append({
+                            'party': party,
+                            'date': entry_date,
+                            'd_str': d_str,
+                            'inv_no': inv_no,
+                            'method': method,
+                            'amount': credit,
+                            'desc': desc or 'নগদ জমা',
+                            'note': note_text
+                        })
+
+                # Create Grouped Sale Invoices (1 invoice per date)
+                for g_idx, (g_key, g_data) in enumerate(grouped_orders.items()):
+                    party = g_data['party']
+                    total_amount = g_data['total_debit']
+                    paid_amount = g_data['total_credit']
+                    due_amount = max(Decimal('0.00'), total_amount - paid_amount)
+                    base_inv = g_data['inv_no'] or f"INV-LEG-{party.id}-{g_data['d_str']}"
+                    unique_inv = base_inv
+                    c = 1
+                    while Transaction.objects.filter(invoice_no=unique_inv).exists():
+                        unique_inv = f"{base_inv}-{c}"
+                        c += 1
+
+                    notes_meta = {
+                        'isHistoricalLedger': True,
+                        'userNote': " | ".join(g_data['notes']) if g_data['notes'] else 'পূর্বের খতিয়ান চালান'
+                    }
+
+                    tx = Transaction.objects.create(
+                        party=party,
+                        party_name=party.name,
+                        party_phone=party.phone,
+                        transaction_type='sale',
+                        status='completed',
+                        subtotal=total_amount,
+                        total_amount=total_amount,
+                        paid_amount=paid_amount,
+                        due_amount=due_amount,
+                        payment_method=g_data['method'],
+                        invoice_no=unique_inv,
+                        created_at=g_data['date'],
+                        notes=json.dumps(notes_meta)
+                    )
+                    created_transactions_count += 1
+
+                    # Add all item lines to this single invoice
+                    for itm in g_data['items']:
+                        TransactionItem.objects.create(
+                            transaction=tx,
+                            product=None,
+                            product_name=itm['desc'],
+                            quantity=itm['qty'],
+                            price=itm['rate'],
+                            unit=itm['unit'],
+                            total=itm['total']
+                        )
+
+                # Create Receipt Transactions
+                for r_idx, r_data in enumerate(direct_receipts):
+                    party = r_data['party']
+                    base_inv = r_data['inv_no'] or f"RCV-LEG-{party.id}-{r_data['d_str']}-{r_idx+1:03d}"
+                    unique_inv = base_inv
+                    c = 1
+                    while Transaction.objects.filter(invoice_no=unique_inv).exists():
+                        unique_inv = f"{base_inv}-{c}"
+                        c += 1
+
+                    notes_meta = {
+                        'isHistoricalLedger': True,
+                        'userNote': r_data['note'] or r_data['desc'] or 'টাকা জমা'
+                    }
+
+                    Transaction.objects.create(
+                        party=party,
+                        party_name=party.name,
+                        party_phone=party.phone,
+                        transaction_type='payment_in',
+                        status='completed',
+                        subtotal=Decimal('0.00'),
+                        total_amount=r_data['amount'],
+                        paid_amount=r_data['amount'],
+                        due_amount=Decimal('0.00'),
+                        payment_method=r_data['method'],
+                        invoice_no=unique_inv,
+                        created_at=r_data['date'],
+                        notes=json.dumps(notes_meta)
+                    )
+                    created_transactions_count += 1
+
+            else:
+                # Row by row mode (independent line entries)
+                for idx, item in enumerate(entries_data):
+                    # 1. Resolve Party
+                    party = None
+                    p_id = item.get('party_id')
+                    if p_id:
+                        party = Party.objects.filter(id=p_id).first()
+                    if not party and default_party:
+                        party = default_party
+
+                    p_phone = str(item.get('phone', '') or item.get('customer_phone', '')).strip()
+                    p_name = str(item.get('name', '') or item.get('customer_name', '') or item.get('party_name', '')).strip()
+
+                    if not party and p_phone:
+                        party = Party.objects.filter(phone=p_phone).first()
+                    if not party and p_name:
+                        clean_p_name = p_name.strip()
+                        party = Party.objects.filter(name__iexact=clean_p_name).first()
+                        if not party:
+                            party = Party.objects.filter(name__icontains=clean_p_name).first()
+
+                    if not party:
+                        if p_name:
+                            party = Party.objects.create(
+                                name=p_name,
+                                phone=p_phone or f"01000{Party.objects.count() + 1:06d}",
+                                party_type='customer',
+                                address=str(item.get('address', '')),
+                                opening_balance=Decimal('0.00'),
+                                total_due=Decimal('0.00'),
+                                total_sales=Decimal('0.00')
+                            )
+                        else:
+                            errors.append(f"রো #{idx + 1}: কাস্টমার চিহ্নিত করা যায়নি।")
+                            continue
+
+                    affected_parties.add(party)
+
+                    # 2. Parse Date & Details
+                    entry_date = parse_date(item.get('date') or item.get('created_at'))
+                    d_str = entry_date.strftime('%Y%m%d')
+
+                    desc = str(item.get('description') or item.get('particulars') or item.get('product_name') or '').strip()
+                    note_text = str(item.get('note') or item.get('notes') or item.get('remarks') or '').strip()
+                    inv_no = str(item.get('invoice_no') or item.get('voucher_no') or item.get('ref_no') or '').strip()
+                    method = str(item.get('payment_method') or 'cash').strip().lower()
+                    if 'bank' in method or 'ব্যাংক' in method:
+                        method = 'bank'
+                    elif 'cheque' in method or 'চেক' in method:
+                        method = 'cheque'
+                    elif 'bkash' in method or 'nagad' in method or 'মোবাইল' in method:
+                        method = 'mobile_banking'
+                    else:
+                        method = 'cash'
+
+                    try:
+                        debit = Decimal(str(item.get('debit', 0) or item.get('bill_amount', 0) or item.get('sale_amount', 0) or 0))
+                    except Exception:
+                        debit = Decimal('0.00')
+
+                    try:
+                        credit = Decimal(str(item.get('credit', 0) or item.get('paid_amount', 0) or item.get('deposit_amount', 0) or 0))
+                    except Exception:
+                        credit = Decimal('0.00')
+
+                    try:
+                        qty = Decimal(str(item.get('quantity', 1) or 1))
+                    except Exception:
+                        qty = Decimal('1.00')
+
+                    try:
+                        rate = Decimal(str(item.get('rate', 0) or item.get('price', 0) or 0))
+                    except Exception:
+                        rate = Decimal('0.00')
+
+                    unit = str(item.get('unit') or 'টি').strip()
+
+                    # Check if Opening Balance
+                    is_opening = (
+                        'opening' in desc.lower() or
+                        'প্রারম্ভিক' in desc or
+                        'পূর্বের জের' in desc or
+                        'পূর্বের বকেয়া' in desc or
+                        'পূর্বের বকেয়া' in desc or
+                        item.get('type') == 'opening'
+                    )
+
+                    if is_opening:
+                        op_amt = debit if debit > 0 else (credit if credit > 0 else Decimal('0.00'))
+                        if op_amt > 0:
+                            party.opening_balance = op_amt
+                            party.save(update_fields=['opening_balance'])
+                        continue
+
+                    notes_meta = {
+                        'isHistoricalLedger': True,
+                        'userNote': note_text or desc or 'পূর্বের খতিয়ান এন্ট্রি'
+                    }
+
+                    # Sale / Bill entry
+                    if debit > 0:
+                        base_inv = inv_no or f"INV-LEG-{party.id}-{d_str}-{idx+1:03d}"
+                        unique_inv = base_inv
+                        c = 1
+                        while Transaction.objects.filter(invoice_no=unique_inv).exists():
+                            unique_inv = f"{base_inv}-{c}"
+                            c += 1
+
+                        due = max(Decimal('0.00'), debit - credit)
+                        tx = Transaction.objects.create(
+                            party=party,
+                            party_name=party.name,
+                            party_phone=party.phone,
+                            transaction_type='sale',
+                            status='completed',
+                            subtotal=debit,
+                            total_amount=debit,
+                            paid_amount=credit,
+                            due_amount=due,
+                            payment_method=method,
+                            invoice_no=unique_inv,
+                            created_at=entry_date,
+                            notes=json.dumps(notes_meta)
+                        )
+                        created_transactions_count += 1
+
+                        TransactionItem.objects.create(
+                            transaction=tx,
+                            product=None,
+                            product_name=desc or 'পণ্য বিক্রয়',
+                            quantity=qty if qty > 0 else Decimal('1.00'),
+                            price=rate if rate > 0 else debit,
+                            unit=unit,
+                            total=debit
+                        )
+
+                    elif credit > 0:
+                        base_inv = inv_no or f"RCV-LEG-{party.id}-{d_str}-{idx+1:03d}"
+                        unique_inv = base_inv
+                        c = 1
+                        while Transaction.objects.filter(invoice_no=unique_inv).exists():
+                            unique_inv = f"{base_inv}-{c}"
+                            c += 1
+
+                        Transaction.objects.create(
+                            party=party,
+                            party_name=party.name,
+                            party_phone=party.phone,
+                            transaction_type='payment_in',
+                            status='completed',
+                            subtotal=Decimal('0.00'),
+                            total_amount=credit,
+                            paid_amount=credit,
+                            due_amount=Decimal('0.00'),
+                            payment_method=method,
+                            invoice_no=unique_inv,
+                            created_at=entry_date,
+                            notes=json.dumps(notes_meta)
+                        )
+                        created_transactions_count += 1
+
+            # 3. Synchronize party total_sales and total_due
+            for party in affected_parties:
+                sales_tot = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['cancelled', 'rejected']).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
+                sales_paid = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
+                payments_tot = Transaction.objects.filter(party=party, transaction_type='payment_in').exclude(status__in=['cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
+                returns_tot = Transaction.objects.filter(party=party, transaction_type='sale_return').exclude(status__in=['cancelled', 'rejected']).aggregate(r=Sum('total_amount'))['r'] or Decimal('0.00')
+
+                net_due = (party.opening_balance or Decimal('0.00')) + sales_tot - sales_paid - payments_tot - returns_tot
+                party.total_sales = sales_tot
+                party.total_due = max(Decimal('0.00'), net_due)
+                party.save(update_fields=['total_sales', 'total_due'])
+
+        return Response({
+            'success': True,
+            'created_count': created_transactions_count,
+            'affected_parties_count': len(affected_parties),
             'errors': errors
         }, status=status.HTTP_200_OK)
 
