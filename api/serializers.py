@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     ShopSettings,
     Party,
+    CustomerSite,
     Category,
     Product,
     Bank,
@@ -25,8 +26,25 @@ def normalize_bengali_digits(val):
         return val
     return str(val).translate(BN_TO_EN_DIGITS)
 
+class CustomerSiteSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(read_only=True)
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+
+    class Meta:
+        model = CustomerSite
+        fields = '__all__'
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            mutable_data = data.copy()
+            if 'contact_phone' in mutable_data and mutable_data['contact_phone'] is not None:
+                mutable_data['contact_phone'] = normalize_bengali_digits(mutable_data['contact_phone'])
+            return super().to_internal_value(mutable_data)
+        return super().to_internal_value(data)
+
 class PartySerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
+    sites = CustomerSiteSerializer(many=True, read_only=True)
     
     class Meta:
         model = Party

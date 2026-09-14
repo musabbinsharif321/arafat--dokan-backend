@@ -17,6 +17,7 @@ from .permissions import RoleBasedAccessPermission, IsAdminUserOnly, get_user_ro
 from .models import (
     ShopSettings,
     Party,
+    CustomerSite,
     Category,
     Product,
     Bank,
@@ -30,6 +31,7 @@ from .models import (
 from .serializers import (
     ShopSettingsSerializer,
     PartySerializer,
+    CustomerSiteSerializer,
     CategorySerializer,
     ProductSerializer,
     BankSerializer,
@@ -606,6 +608,26 @@ class PartyViewSet(viewsets.ModelViewSet):
             'affected_parties_count': len(affected_parties),
             'errors': errors
         }, status=status.HTTP_200_OK)
+
+class CustomerSiteViewSet(viewsets.ModelViewSet):
+    queryset = CustomerSite.objects.all().order_by('-created_at')
+    serializer_class = CustomerSiteSerializer
+    permission_classes = [RoleBasedAccessPermission]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        customer_id = self.request.query_params.get('customer') or self.request.query_params.get('customer_id') or self.request.query_params.get('party')
+        if customer_id:
+            qs = qs.filter(customer_id=customer_id)
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) |
+                Q(address__icontains=search) |
+                Q(contact_person__icontains=search) |
+                Q(contact_phone__icontains=search)
+            )
+        return qs
 
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by('name')

@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ShopSettingsViewSet,
     PartyViewSet,
+    CustomerSiteViewSet,
     CategoryViewSet,
     ProductViewSet,
     BankViewSet,
@@ -20,6 +21,7 @@ from .views import (
 router = DefaultRouter()
 router.register(r'settings', ShopSettingsViewSet, basename='settings')
 router.register(r'parties', PartyViewSet, basename='party')
+router.register(r'customer-sites', CustomerSiteViewSet, basename='customer-site')
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'products', ProductViewSet, basename='product')
 router.register(r'banks', BankViewSet, basename='bank')

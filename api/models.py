@@ -59,6 +59,22 @@ class Party(models.Model):
     def __str__(self):
         return f"{self.name} ({self.phone})"
 
+class CustomerSite(models.Model):
+    customer = models.ForeignKey(Party, on_delete=models.CASCADE, related_name='sites')
+    name = models.CharField(max_length=255)
+    address = models.TextField(blank=True, default='')
+    contact_person = models.CharField(max_length=255, blank=True, default='')
+    contact_phone = models.CharField(max_length=50, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = 'Customer Sites'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.customer.name} - {self.name}"
+
 class Category(models.Model):
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True, null=True)
@@ -127,6 +143,10 @@ class Transaction(models.Model):
     party = models.ForeignKey(Party, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
     party_name = models.CharField(max_length=255, blank=True, null=True)
     party_phone = models.CharField(max_length=50, blank=True, null=True)
+    customer_site = models.ForeignKey(CustomerSite, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
+    site_name = models.CharField(max_length=255, blank=True, null=True)
+    site_address = models.TextField(blank=True, null=True)
+    site_contact = models.CharField(max_length=100, blank=True, null=True)
     transaction_type = models.CharField(max_length=30, choices=TYPE_CHOICES, default='sale', db_index=True)
     status = models.CharField(max_length=30, default='completed')
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
