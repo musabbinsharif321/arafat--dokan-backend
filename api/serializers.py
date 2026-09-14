@@ -42,6 +42,63 @@ class CustomerSiteSerializer(serializers.ModelSerializer):
             return super().to_internal_value(mutable_data)
         return super().to_internal_value(data)
 
+
+def recalculate_party_balances(party):
+    if not party:
+        return
+    import json
+    from django.db.models import Sum
+    from decimal import Decimal
+    
+    is_supplier = (party.party_type in ['supplier', 'both'])
+    is_engineer = (party.party_type == 'engineer')
+    
+    if is_supplier:
+        purchases = Transaction.objects.filter(party=party, transaction_type='purchase').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected'])
+        purchases_tot = Decimal('0.00')
+        for p_tx in purchases:
+            amt = Decimal(str(p_tx.total_amount or 0))
+            if p_tx.notes and p_tx.notes.strip().startswith('{'):
+                try:
+                    meta = json.loads(p_tx.notes.split('\n')[0])
+                    ship = Decimal(str(meta.get('shippingCost') or meta.get('shipping_cost') or meta.get('transportCost') or 0))
+                    lab = Decimal(str(meta.get('laborCost') or meta.get('labor_cost') or 0))
+                    amt = max(Decimal('0.00'), amt - (ship + lab))
+                except Exception:
+                    pass
+            purchases_tot += amt
+
+        purchases_paid = purchases.aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
+        payments_agg = Transaction.objects.filter(party=party, transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
+        payments_tot = (payments_agg['p'] or Decimal('0.00')) + (payments_agg['d'] or Decimal('0.00'))
+        returns_tot = Transaction.objects.filter(party=party, transaction_type='purchase_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(r=Sum('total_amount'))['r'] or Decimal('0.00')
+        
+        net_balance = (party.opening_balance or Decimal('0.00')) + purchases_tot - purchases_paid - payments_tot - returns_tot
+        party.total_purchases = purchases_tot
+    elif is_engineer:
+        payments_agg = Transaction.objects.filter(party=party, transaction_type__in=['payment_out', 'payment_in', 'payment', 'expense']).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
+        payments_tot = (payments_agg['p'] or Decimal('0.00')) + (payments_agg['d'] or Decimal('0.00'))
+        net_balance = (party.opening_balance or Decimal('0.00')) - payments_tot
+    else:
+        sales_tot = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
+        sales_paid = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
+        payments_agg = Transaction.objects.filter(party=party, transaction_type='payment_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
+        payments_tot = (payments_agg['p'] or Decimal('0.00')) + (payments_agg['d'] or Decimal('0.00'))
+        returns_tot = Transaction.objects.filter(party=party, transaction_type='sale_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(r=Sum('total_amount'))['r'] or Decimal('0.00')
+        
+        net_balance = (party.opening_balance or Decimal('0.00')) + sales_tot - sales_paid - payments_tot - returns_tot
+        party.total_sales = sales_tot
+
+    if net_balance >= Decimal('0.00'):
+        party.total_due = net_balance
+        party.advance_balance = Decimal('0.00')
+    else:
+        party.total_due = Decimal('0.00')
+        party.advance_balance = abs(net_balance)
+        
+    update_fields = ['total_sales', 'total_purchases', 'total_due', 'advance_balance'] if is_supplier else ['total_sales', 'total_due', 'advance_balance']
+    party.save(update_fields=update_fields)
+
 class PartySerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
     sites = CustomerSiteSerializer(many=True, read_only=True)
@@ -486,35 +543,7 @@ class TransactionSerializer(serializers.ModelSerializer):
                     prod.save(update_fields=['sell_price'])
 
         if party and is_active:
-            if transaction.transaction_type == 'sale':
-                party.total_due += transaction.due_amount
-                party.total_sales += transaction.total_amount
-                party.save()
-            elif transaction.transaction_type == 'purchase':
-                supplier_due = transaction.due_amount
-                supplier_purchases = Decimal(str(transaction.total_amount or 0))
-                if transaction.notes and transaction.notes.strip().startswith('{'):
-                    try:
-                        import json
-                        first_line = transaction.notes.split('\n')[0]
-                        meta = json.loads(first_line)
-                        if 'supplierDue' in meta and meta['supplierDue'] is not None:
-                            supplier_due = Decimal(str(meta['supplierDue']))
-                        ship = Decimal(str(meta.get('shippingCost') or 0))
-                        lab = Decimal(str(meta.get('laborCost') or 0))
-                        supplier_purchases = max(Decimal('0.00'), supplier_purchases - (ship + lab))
-                    except Exception:
-                        pass
-                party.total_due += supplier_due
-                party.total_purchases += supplier_purchases
-                party.save()
-            elif transaction.transaction_type in ['sale_return', 'purchase_return']:
-                due_reduction = max(Decimal('0.00'), Decimal(str(transaction.total_amount)) - Decimal(str(transaction.paid_amount)))
-                party.total_due = max(Decimal('0.00'), Decimal(str(party.total_due)) - due_reduction)
-                party.save()
-            elif transaction.transaction_type in ['payment_in', 'payment_out']:
-                party.total_due = max(Decimal('0.00'), Decimal(str(party.total_due)) - Decimal(str(transaction.paid_amount)))
-                party.save()
+            recalculate_party_balances(party)
 
         # Chronologically recalculate stock & weighted cost for all affected products
         if is_active:
@@ -536,38 +565,7 @@ class TransactionSerializer(serializers.ModelSerializer):
 
         old_is_active = instance.status not in ['pending', 'draft', 'cancelled', 'rejected']
 
-        # 1. Revert previous transaction effects on old party if it was active
-        if old_party and old_is_active:
-            if old_type == 'sale':
-                old_party.total_due = Decimal(str(old_party.total_due)) - old_due
-                old_party.total_sales = Decimal(str(old_party.total_sales)) - old_total
-                old_party.save()
-            elif old_type == 'purchase':
-                old_supplier_due = old_due
-                old_supplier_purchases = old_total
-                if instance.notes and instance.notes.strip().startswith('{'):
-                    try:
-                        first_line = instance.notes.split('\n')[0]
-                        meta = json.loads(first_line)
-                        if 'supplierDue' in meta and meta['supplierDue'] is not None:
-                            old_supplier_due = Decimal(str(meta['supplierDue']))
-                        ship = Decimal(str(meta.get('shippingCost') or 0))
-                        lab = Decimal(str(meta.get('laborCost') or 0))
-                        old_supplier_purchases = max(Decimal('0.00'), old_supplier_purchases - (ship + lab))
-                    except Exception:
-                        pass
-                old_party.total_due = Decimal(str(old_party.total_due)) - old_supplier_due
-                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_supplier_purchases
-                old_party.save()
-            elif old_type in ['sale_return', 'purchase_return']:
-                due_red = max(Decimal('0.00'), old_total - old_paid)
-                old_party.total_due = Decimal(str(old_party.total_due)) + due_red
-                old_party.save()
-            elif old_type in ['payment_in', 'payment_out']:
-                old_party.total_due = Decimal(str(old_party.total_due)) + old_paid
-                old_party.save()
-
-        # 2. Delete old items
+        # 1. Delete old items if new items provided
         if items_data is not None:
             instance.items.all().delete()
 
@@ -624,38 +622,13 @@ class TransactionSerializer(serializers.ModelSerializer):
                 if p:
                     affected_product_ids.add(p.id)
 
-        # 5. Apply new transaction effect on current/updated party ONLY if new transaction is active
-        if instance.party_id and new_is_active:
+        # 5. Recalculate party balances for old and new party
+        if old_party:
+            recalculate_party_balances(old_party)
+        if instance.party_id and (not old_party or instance.party_id != old_party.id):
             new_party = Party.objects.filter(id=instance.party_id).first()
             if new_party:
-                if instance.transaction_type == 'sale':
-                    new_party.total_due = Decimal(str(new_party.total_due)) + Decimal(str(instance.due_amount or 0))
-                    new_party.total_sales = Decimal(str(new_party.total_sales)) + Decimal(str(instance.total_amount or 0))
-                    new_party.save()
-                elif instance.transaction_type == 'purchase':
-                    supplier_due = Decimal(str(instance.due_amount or 0))
-                    supplier_purchases = Decimal(str(instance.total_amount or 0))
-                    if instance.notes and instance.notes.strip().startswith('{'):
-                        try:
-                            first_line = instance.notes.split('\n')[0]
-                            meta = json.loads(first_line)
-                            if 'supplierDue' in meta and meta['supplierDue'] is not None:
-                                supplier_due = Decimal(str(meta['supplierDue']))
-                            ship = Decimal(str(meta.get('shippingCost') or 0))
-                            lab = Decimal(str(meta.get('laborCost') or 0))
-                            supplier_purchases = max(Decimal('0.00'), supplier_purchases - (ship + lab))
-                        except Exception:
-                            pass
-                    new_party.total_due = Decimal(str(new_party.total_due)) + supplier_due
-                    new_party.total_purchases = Decimal(str(new_party.total_purchases)) + supplier_purchases
-                    new_party.save()
-                elif instance.transaction_type in ['sale_return', 'purchase_return']:
-                    due_reduction = max(Decimal('0.00'), Decimal(str(instance.total_amount or 0)) - Decimal(str(instance.paid_amount or 0)))
-                    new_party.total_due = Decimal(str(new_party.total_due)) - due_reduction
-                    new_party.save()
-                elif instance.transaction_type in ['payment_in', 'payment_out']:
-                    new_party.total_due = Decimal(str(new_party.total_due)) - Decimal(str(instance.paid_amount or 0))
-                    new_party.save()
+                recalculate_party_balances(new_party)
 
         # 6. Chronologically recalculate stock & weighted cost for all affected products
         for pid in affected_product_ids:

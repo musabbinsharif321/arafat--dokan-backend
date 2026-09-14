@@ -48,6 +48,7 @@ class Party(models.Model):
     credit_days = models.IntegerField(default=30)
     discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     total_due = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    advance_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     total_purchases = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     total_sales = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     joined_date = models.DateField(default=timezone.localdate)

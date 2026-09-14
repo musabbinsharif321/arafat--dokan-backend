@@ -81,6 +81,16 @@ class PartyViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def perform_create(self, serializer):
+        from .serializers import recalculate_party_balances
+        instance = serializer.save()
+        recalculate_party_balances(instance)
+
+    def perform_update(self, serializer):
+        from .serializers import recalculate_party_balances
+        instance = serializer.save()
+        recalculate_party_balances(instance)
+
     @action(detail=False, methods=['post'], url_path='bulk-import')
     def bulk_import(self, request):
         parties_data = request.data.get('parties', [])
@@ -121,6 +131,7 @@ class PartyViewSet(viewsets.ModelViewSet):
                 except Exception:
                     total_due = opening_balance
 
+                from .serializers import recalculate_party_balances
                 if party:
                     party.name = name
                     if business_name:
@@ -132,9 +143,10 @@ class PartyViewSet(viewsets.ModelViewSet):
                     if 'total_due' in item or 'opening_balance' in item:
                         party.total_due = total_due
                     party.save()
+                    recalculate_party_balances(party)
                     updated_count += 1
                 else:
-                    Party.objects.create(
+                    new_p = Party.objects.create(
                         name=name,
                         phone=phone,
                         party_type=party_type,
@@ -143,6 +155,7 @@ class PartyViewSet(viewsets.ModelViewSet):
                         opening_balance=opening_balance,
                         total_due=total_due
                     )
+                    recalculate_party_balances(new_p)
                     created_count += 1
 
         return Response({
@@ -590,17 +603,10 @@ class PartyViewSet(viewsets.ModelViewSet):
                         )
                         created_transactions_count += 1
 
-            # 3. Synchronize party total_sales and total_due
+            # 3. Synchronize party total_sales, total_due, and advance_balance
+            from .serializers import recalculate_party_balances
             for party in affected_parties:
-                sales_tot = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['cancelled', 'rejected']).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
-                sales_paid = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
-                payments_tot = Transaction.objects.filter(party=party, transaction_type='payment_in').exclude(status__in=['cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
-                returns_tot = Transaction.objects.filter(party=party, transaction_type='sale_return').exclude(status__in=['cancelled', 'rejected']).aggregate(r=Sum('total_amount'))['r'] or Decimal('0.00')
-
-                net_due = (party.opening_balance or Decimal('0.00')) + sales_tot - sales_paid - payments_tot - returns_tot
-                party.total_sales = sales_tot
-                party.total_due = max(Decimal('0.00'), net_due)
-                party.save(update_fields=['total_sales', 'total_due'])
+                recalculate_party_balances(party)
 
         return Response({
             'success': True,
@@ -846,43 +852,8 @@ class TransactionViewSet(viewsets.ModelViewSet):
         return Response({'detail': 'ইনভয়েস সফলভাবে অনুমোদন করা হয়েছে', 'data': serializer.data}, status=status.HTTP_200_OK)
 
     def perform_destroy(self, instance):
-        from decimal import Decimal
-        import json
+        from .serializers import recalculate_party_balances, recalculate_product_stock_and_cost
         old_party = Party.objects.filter(id=instance.party_id).first() if instance.party_id else None
-        old_type = instance.transaction_type
-        old_total = instance.total_amount or Decimal('0.00')
-        old_due = instance.due_amount or Decimal('0.00')
-        old_paid = instance.paid_amount or Decimal('0.00')
-
-        if old_party and instance.status not in ['pending', 'draft', 'cancelled', 'rejected']:
-            if old_type == 'sale':
-                old_party.total_due = Decimal(str(old_party.total_due)) - old_due
-                old_party.total_sales = Decimal(str(old_party.total_sales)) - old_total
-                old_party.save()
-            elif old_type == 'purchase':
-                old_supplier_due = Decimal(str(old_due))
-                old_supplier_purchases = Decimal(str(old_total))
-                if instance.notes and instance.notes.strip().startswith('{'):
-                    try:
-                        first_line = instance.notes.split('\n')[0]
-                        meta = json.loads(first_line)
-                        if 'supplierDue' in meta and meta['supplierDue'] is not None:
-                            old_supplier_due = Decimal(str(meta['supplierDue']))
-                        ship = Decimal(str(meta.get('shippingCost') or 0))
-                        lab = Decimal(str(meta.get('laborCost') or 0))
-                        old_supplier_purchases = max(Decimal('0.00'), old_supplier_purchases - (ship + lab))
-                    except Exception:
-                        pass
-                old_party.total_due = Decimal(str(old_party.total_due)) - old_supplier_due
-                old_party.total_purchases = Decimal(str(old_party.total_purchases)) - old_supplier_purchases
-                old_party.save()
-            elif old_type in ['sale_return', 'purchase_return']:
-                due_red = max(Decimal('0.00'), Decimal(str(old_total)) - Decimal(str(old_paid)))
-                old_party.total_due = Decimal(str(old_party.total_due)) + due_red
-                old_party.save()
-            elif old_type in ['payment_in', 'payment_out']:
-                old_party.total_due = Decimal(str(old_party.total_due)) + Decimal(str(old_paid))
-                old_party.save()
 
         affected_product_ids = set(instance.items.exclude(product__isnull=True).values_list('product_id', flat=True))
         for item in instance.items.filter(product__isnull=True):
@@ -892,6 +863,9 @@ class TransactionViewSet(viewsets.ModelViewSet):
                     affected_product_ids.add(matched_p.id)
 
         instance.delete()
+
+        if old_party:
+            recalculate_party_balances(old_party)
 
         for pid in affected_product_ids:
             recalculate_product_stock_and_cost(pid)
@@ -985,7 +959,9 @@ class DashboardStatsView(APIView):
         sales_paid = sales_qs.aggregate(total=Sum('paid_amount'))['total'] or 0
         # Customer total due should reflect actual Party accounts
         customer_dues = Party.objects.filter(party_type='customer').aggregate(total=Sum('total_due'))['total'] or 0
+        customer_advances = Party.objects.filter(party_type='customer').aggregate(total=Sum('advance_balance'))['total'] or 0
         total_dues = customer_dues
+        total_advances = customer_advances
         monthly_sales = sales_qs.filter(created_at__gte=first_day_of_month).aggregate(total=Sum('total_amount'))['total'] or 0
 
         # Purchase aggregates (excluding pending / unapproved)
@@ -1042,6 +1018,7 @@ class DashboardStatsView(APIView):
             'totalPurchases': float(total_purchases),
             'monthlyPurchases': float(monthly_purchases),
             'totalDues': float(total_dues),
+            'totalAdvances': float(total_advances),
             'totalExpenses': float(total_expenses),
             'monthlyExpenses': float(monthly_expenses),
             'totalCash': total_cash,
