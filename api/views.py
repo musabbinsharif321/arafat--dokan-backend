@@ -854,6 +854,7 @@ class TransactionViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         from .serializers import recalculate_party_balances, recalculate_product_stock_and_cost
         old_party = Party.objects.filter(id=instance.party_id).first() if instance.party_id else None
+        was_active = instance.status not in ['pending', 'draft', 'cancelled', 'rejected']
 
         affected_product_ids = set(instance.items.exclude(product__isnull=True).values_list('product_id', flat=True))
         for item in instance.items.filter(product__isnull=True):
@@ -864,11 +865,12 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
         instance.delete()
 
-        if old_party:
+        if old_party and was_active:
             recalculate_party_balances(old_party)
 
-        for pid in affected_product_ids:
-            recalculate_product_stock_and_cost(pid)
+        if was_active:
+            for pid in affected_product_ids:
+                recalculate_product_stock_and_cost(pid)
 
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
     queryset = ExpenseCategory.objects.all().order_by('name')
@@ -1043,31 +1045,44 @@ class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        identifier = (
+        def to_en_digits(val):
+            if not val:
+                return ''
+            val = str(val).strip()
+            bn = "০১২৩৪৫৬৭৮৯"
+            en = "0123456789"
+            for b, e in zip(bn, en):
+                val = val.replace(b, e)
+            return val
+
+        raw_id = str(
             request.data.get('email') or 
             request.data.get('username') or 
             request.data.get('identifier') or 
             ''
         ).strip()
-        password = request.data.get('password', '').strip()
+        raw_pass = str(request.data.get('password') or '').strip()
 
-        if not identifier or not password:
+        identifier = to_en_digits(raw_id)
+        password = to_en_digits(raw_pass)
+
+        if not identifier or not raw_pass:
             return Response({'detail': 'ইমেইল/ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।'}, status=status.HTTP_400_BAD_REQUEST)
 
         # 1. Lookup by Email
-        user = User.objects.filter(email__iexact=identifier).first()
+        user = User.objects.filter(email__iexact=identifier).first() or User.objects.filter(email__iexact=raw_id).first()
 
         # 2. Lookup by Username
         if not user:
-            user = User.objects.filter(username__iexact=identifier).first()
+            user = User.objects.filter(username__iexact=identifier).first() or User.objects.filter(username__iexact=raw_id).first()
 
         # 3. Lookup by Profile Phone
         if not user:
-            profile = UserProfile.objects.filter(phone=identifier).first()
+            profile = UserProfile.objects.filter(phone=identifier).first() or UserProfile.objects.filter(phone=raw_id).first()
             if profile:
                 user = profile.user
 
-        if user and user.check_password(password):
+        if user and (user.check_password(raw_pass) or user.check_password(password)):
             if not user.is_active:
                 return Response({'detail': 'আপনার একাউন্টটি নিষ্ক্রিয় করা আছে। এডমিনের সাথে যোগাযোগ করুন।'}, status=status.HTTP_403_FORBIDDEN)
 

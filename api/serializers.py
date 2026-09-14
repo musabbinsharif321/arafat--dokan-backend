@@ -622,17 +622,19 @@ class TransactionSerializer(serializers.ModelSerializer):
                 if p:
                     affected_product_ids.add(p.id)
 
-        # 5. Recalculate party balances for old and new party
-        if old_party:
-            recalculate_party_balances(old_party)
-        if instance.party_id and (not old_party or instance.party_id != old_party.id):
-            new_party = Party.objects.filter(id=instance.party_id).first()
-            if new_party:
-                recalculate_party_balances(new_party)
+        # 5. Recalculate party balances for old and new party if either state was/is active
+        if old_is_active or new_is_active:
+            if old_party:
+                recalculate_party_balances(old_party)
+            if instance.party_id and (not old_party or instance.party_id != old_party.id):
+                new_party = Party.objects.filter(id=instance.party_id).first()
+                if new_party:
+                    recalculate_party_balances(new_party)
 
-        # 6. Chronologically recalculate stock & weighted cost for all affected products
-        for pid in affected_product_ids:
-            recalculate_product_stock_and_cost(pid)
+        # 6. Chronologically recalculate stock & weighted cost for all affected products only if active
+        if old_is_active or new_is_active:
+            for pid in affected_product_ids:
+                recalculate_product_stock_and_cost(pid)
 
         return instance
 
