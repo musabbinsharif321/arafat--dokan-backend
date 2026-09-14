@@ -26,12 +26,12 @@ def recalculate_product_stock_and_cost(product_or_id):
     )
 
     if not items.exists():
-        product.stock = Decimal('0.00')
+        product.stock = product.opening_stock or Decimal('0.00')
         product.save(update_fields=['stock'])
         return product
 
-    running_stock = 0.0
-    running_purchase_price = 0.0
+    running_stock = float(product.opening_stock or 0.0)
+    running_purchase_price = float(product.purchase_price or 0.0)
 
     for item in items:
         tx = item.transaction
@@ -112,9 +112,28 @@ def generate_product_cost_log(product_or_id):
 
     items_list = list(items)
     logs = []
-    running_stock = 0.0
-    running_purchase_price = 0.0
+    running_stock = float(product.opening_stock or 0.0)
+    running_purchase_price = float(product.purchase_price or 0.0)
     any_prior_edited = False
+
+    if product.opening_stock and float(product.opening_stock) > 0:
+        logs.append({
+            'invoice_no': 'OPENING-STOCK',
+            'date': product.created_at.strftime('%Y-%m-%d') if product.created_at else '',
+            'type': 'opening_stock',
+            'type_bn': 'প্রারম্ভিক মজুদ (Opening Stock)',
+            'party_name': 'দোকান মজুদ',
+            'quantity': float(product.opening_stock),
+            'unit': product.unit,
+            'unit_price': float(product.purchase_price or 0.0),
+            'landed_price': float(product.purchase_price or 0.0),
+            'extra_cost_per_unit': 0.0,
+            'stock_before': 0.0,
+            'stock_after': float(product.opening_stock),
+            'cost_before': 0.0,
+            'cost_after': float(product.purchase_price or 0.0),
+            'formula': f"প্রারম্ভিক মজুদ: {float(product.opening_stock)} {product.unit}"
+        })
 
     for idx, item in enumerate(items_list):
         tx = item.transaction

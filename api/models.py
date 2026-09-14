@@ -91,6 +91,7 @@ class Product(models.Model):
     sku = models.CharField(max_length=100, blank=True, null=True, db_index=True)
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     category_name = models.CharField(max_length=100, blank=True, null=True)
+    opening_stock = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     stock = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     min_stock = models.DecimalField(max_digits=10, decimal_places=2, default=5)
     unit = models.CharField(max_length=50, default='পিস')
@@ -102,6 +103,11 @@ class Product(models.Model):
     needs_price_review = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if not self.pk and (self.opening_stock is None or self.opening_stock == 0) and self.stock:
+            self.opening_stock = self.stock
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} (Stock: {self.stock})"
