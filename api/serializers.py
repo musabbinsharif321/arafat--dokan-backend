@@ -399,9 +399,11 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
     )
     cash_balance = cash_in - cash_out
 
+    # Exclude internal balance transfers from bank_out since Bank balances are already updated directly
+    bank_p_out_qs = filtered_p_out_qs.exclude(notes__contains='isTransfer').exclude(notes__contains='ব্যালেন্স ট্রান্সফার').exclude(party_name__contains='➔')
     bank_out = (
         (purchases_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
-        (filtered_p_out_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
+        (bank_p_out_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
         (filtered_exp_qs.filter(payment_method__in=['bank', 'cheque', 'mobile_banking', 'mobile', 'bkash']).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
     )
     banks_initial = Bank.objects.aggregate(tot=Sum('balance'))['tot'] or Decimal('0.00')
