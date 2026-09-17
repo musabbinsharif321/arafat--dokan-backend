@@ -385,10 +385,10 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
         except Exception:
             pass
 
-    # Exclude any settlement payment_out/in transactions and duplicate expenses that duplicate purchase/sales notes
-    filtered_p_out_qs = p_out_qs.exclude(notes__contains='গাড়ি ভাড়া').exclude(notes__contains='লেবার').exclude(notes__contains='লোডিং')
-    filtered_p_in_qs = p_in_qs.exclude(notes__contains='গাড়ি ভাড়া').exclude(notes__contains='লেবার').exclude(notes__contains='লোডিং')
-    filtered_exp_qs = exp_qs.exclude(title__contains='লোডিং চার্জ').exclude(title__contains='আনলোডিং চার্জ').exclude(title__contains='গাড়ি ভাড়া')
+    # Include all real cash payment_out transactions and expenses
+    filtered_p_out_qs = p_out_qs
+    filtered_p_in_qs = p_in_qs
+    filtered_exp_qs = exp_qs
 
     cash_out = (
         (purchases_qs.filter(payment_method__in=['cash', 'split', None, '']).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +

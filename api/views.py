@@ -7,7 +7,7 @@ from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
-from django.db.models import Sum, Count, F, Q
+from django.db.models import Sum, Count, F, Q, Case, When, Value, IntegerField
 from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
@@ -643,8 +643,64 @@ class CategoryViewSet(viewsets.ModelViewSet):
 from rest_framework.decorators import action
 from .services import recalculate_product_stock_and_cost, generate_product_cost_log
 
+def apply_product_custom_ordering(qs):
+    cat_order = Case(
+        When(Q(category_name='রড') | Q(category__name='রড') | Q(name__icontains='রড') | Q(brand__iexact='BSRM') | Q(brand__iexact='SCRM') | Q(brand__iexact='SCRM TMX') | Q(brand__iexact='KSML') | Q(brand__iexact='HKG') | Q(brand__iexact='DSRM'), then=Value(1)),
+        When(Q(category_name='রিং') | Q(category__name='রিং') | Q(name__icontains='রিং') | Q(name__icontains='ring'), then=Value(2)),
+        When(Q(category_name='সিমেন্ট') | Q(category__name='সিমেন্ট') | Q(name__icontains='সিমেন্ট') | Q(name__icontains='cement') | Q(brand__icontains='Holcim') | Q(brand__icontains='King') | Q(brand__icontains='Aman'), then=Value(3)),
+        default=Value(4),
+        output_field=IntegerField()
+    )
+
+    sub_order = Case(
+        # Rods: BSRM (1), SCRM (2), SCRM TMX (3), KSML (4), HKG (5), DSRM (6)
+        When(Q(brand__iexact='BSRM') | Q(name__icontains='BSRM'), then=Value(10)),
+        When(Q(brand__iexact='SCRM TMX') | Q(name__icontains='SCRM TMX') | Q(name__icontains='TMX'), then=Value(30)),
+        When(Q(brand__iexact='SCRM') | Q(name__icontains='SCRM'), then=Value(20)),
+        When(Q(brand__iexact='KSML') | Q(name__icontains='KSML'), then=Value(40)),
+        When(Q(brand__iexact='HKG') | Q(name__icontains='HKG'), then=Value(50)),
+        When(Q(brand__iexact='DSRM') | Q(name__icontains='DSRM'), then=Value(60)),
+
+        # Rings: 3-3, 3-4, 3-7, 7-7, 7-9, Pistol
+        When(Q(name__icontains='3-3') | Q(name__icontains='3*3') | Q(name__icontains='3x3') | Q(name__icontains='৩-৩'), then=Value(100)),
+        When(Q(name__icontains='3-4') | Q(name__icontains='3*4') | Q(name__icontains='3x4') | Q(name__icontains='৩-৪'), then=Value(110)),
+        When(Q(name__icontains='3-7') | Q(name__icontains='3*7') | Q(name__icontains='3x7') | Q(name__icontains='৩-৭'), then=Value(120)),
+        When(Q(name__icontains='7-7') | Q(name__icontains='7*7') | Q(name__icontains='7x7') | Q(name__icontains='৭-৭'), then=Value(130)),
+        When(Q(name__icontains='7-9') | Q(name__icontains='7*9') | Q(name__icontains='7x9') | Q(name__icontains='৭-৯'), then=Value(140)),
+        When(Q(name__icontains='pistol') | Q(name__icontains='পিস্তল'), then=Value(150)),
+
+        # Cements: Strong Structure, Supercrete, Supercrete Plus, Coastal Guard, Waterprotect, King Brand, Aman
+        When(Q(name__icontains='Strong Structure') | Q(name__icontains='স্ট্রং স্ট্রাকচার'), then=Value(200)),
+        When(Q(name__icontains='Supercrete Plus') | Q(name__icontains='সুপারক্রিট প্লাস'), then=Value(220)),
+        When(Q(name__icontains='Supercrete') | Q(name__icontains='সুপারক্রিট'), then=Value(210)),
+        When(Q(name__icontains='Coastal Guard') | Q(name__icontains='কোস্টাল গার্ড'), then=Value(230)),
+        When(Q(name__icontains='Waterprotect') | Q(name__icontains='ওয়াটারপ্রটেক্ট'), then=Value(240)),
+        When(Q(brand__icontains='King Brand') | Q(name__icontains='King Brand') | Q(name__icontains='কিং ব্র্যান্ড'), then=Value(250)),
+        When(Q(brand__icontains='Aman') | Q(name__icontains='Aman') | Q(name__icontains='আমান'), then=Value(260)),
+
+        default=Value(999),
+        output_field=IntegerField()
+    )
+
+    size_order = Case(
+        When(Q(name__icontains='৮ মিলি') | Q(name__icontains='8mm') | Q(name__icontains='8 মিলি') | Q(name__icontains='8 মি.লি') | Q(name__icontains='8মি.লি'), then=Value(8)),
+        When(Q(name__icontains='১০ মিলি') | Q(name__icontains='10mm') | Q(name__icontains='10 মিলি') | Q(name__icontains='10 মি.লি') | Q(name__icontains='10মি.লি'), then=Value(10)),
+        When(Q(name__icontains='১২ মিলি') | Q(name__icontains='12mm') | Q(name__icontains='12 মিলি') | Q(name__icontains='12 মি.লি') | Q(name__icontains='12মি.লি'), then=Value(12)),
+        When(Q(name__icontains='১৬ মিলি') | Q(name__icontains='16mm') | Q(name__icontains='16 মিলি') | Q(name__icontains='16 মি.লি') | Q(name__icontains='16মি.লি'), then=Value(16)),
+        When(Q(name__icontains='২০ মিলি') | Q(name__icontains='20mm') | Q(name__icontains='20 মিলি') | Q(name__icontains='20 মি.লি') | Q(name__icontains='20মি.লি'), then=Value(20)),
+        When(Q(name__icontains='২৫ মিলি') | Q(name__icontains='25mm') | Q(name__icontains='25 মিলি') | Q(name__icontains='25 মি.লি') | Q(name__icontains='25মি.লি'), then=Value(25)),
+        default=Value(999),
+        output_field=IntegerField()
+    )
+
+    return qs.annotate(
+        cat_order=cat_order,
+        sub_order=sub_order,
+        size_order=size_order
+    ).order_by('cat_order', 'sub_order', 'size_order', 'name')
+
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.all().order_by('name')
+    queryset = Product.objects.all()
     serializer_class = ProductSerializer
     permission_classes = [RoleBasedAccessPermission]
 
@@ -667,7 +723,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                 Q(brand__icontains=search)
             )
 
-        return qs
+        return apply_product_custom_ordering(qs)
 
     @action(detail=False, methods=['get'], url_path='cost_logs')
     def cost_logs(self, request):
