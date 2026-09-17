@@ -251,18 +251,59 @@ def find_or_create_product_for_purchase(item_name, unit, price, brand_param=None
             is_prod_opc = 'opc' in p_combined
             is_prod_pcc = 'pcc' in p_combined
 
-            # If either item or existing product has OPC or PCC, they must strictly match
-            if (is_item_opc or is_item_pcc) or (is_prod_opc or is_prod_pcc):
-                if is_item_opc != is_prod_opc or is_item_pcc != is_prod_pcc:
+            # If item explicitly specifies OPC or PCC, it cannot conflict with product's type
+            if is_item_opc and is_prod_pcc:
+                continue
+            if is_item_pcc and is_prod_opc:
+                continue
+
+            # Strict cement sub-brand / variant definitions
+            cement_variants = [
+                ('supercrete plus', ['supercrete plus', 'সুপারক্রিট প্লাস', 'সুপার ক্রিট প্লাস']),
+                ('supercrete', ['supercrete', 'সুপারক্রিট', 'সুপার ক্রিট']),
+                ('strong structure', ['strong structure', 'স্ট্রং স্ট্রাকচার', 'স্ট্রংস্ট্রাকচার']),
+                ('coastal guard', ['coastal guard', 'কোস্টাল গার্ড', 'কোস্টালগার্ড']),
+                ('waterprotect', ['waterprotect', 'water protect', 'ওয়াটারপ্রোটেক্ট', 'ওয়াটারপ্রোটেক্ট', 'ওয়াটার প্রোটেক্ট']),
+                ('king brand', ['king brand', 'কিং ব্র্যান্ড', 'কিংব্র্যান্ড']),
+                ('gold', ['gold', 'গোল্ড']),
+                ('complete', ['complete', 'কমপ্লিট']),
+                ('composite', ['composite', 'কম্পোজিট']),
+                ('special', ['special', 'স্পেশাল']),
+            ]
+
+            item_variant_key = None
+            for v_key, v_aliases in cement_variants:
+                if any(alias in cleaned_norm for alias in v_aliases):
+                    item_variant_key = v_key
+                    break
+
+            if item_variant_key:
+                # Target product must contain the matching variant
+                v_aliases = dict(cement_variants)[item_variant_key]
+                if not any(alias in p_combined for alias in v_aliases):
                     continue
 
-            if matched_brand_tokens:
-                if any(alias in p_combined for alias in matched_brand_tokens):
-                    return prod
-            elif ('সিমেন্ট' in p_name_norm or (prod.category_name and 'সিমেন্ট' in prod.category_name)):
-                brand_word = cleaned_name.replace('সিমেন্ট', '').strip().lower()
-                if brand_word and brand_word in p_name_norm:
-                    return prod
+                # If brand is detected, it must match
+                if matched_brand_tokens and not any(alias in p_combined for alias in matched_brand_tokens):
+                    continue
+
+                # Ensure base "supercrete" does not match "supercrete plus"
+                if item_variant_key == 'supercrete':
+                    plus_aliases = ['plus', 'প্লাস']
+                    if any(pa in p_combined for pa in plus_aliases):
+                        continue
+
+                return prod
+            else:
+                # Untyped cement without specific variant
+                if matched_brand_tokens and any(alias in p_combined for alias in matched_brand_tokens):
+                    has_other_variant = any(any(alias in p_combined for alias in v_aliases) for _, v_aliases in cement_variants)
+                    if not has_other_variant:
+                        return prod
+                elif ('সিমেন্ট' in p_name_norm or (prod.category_name and 'সিমেন্ট' in prod.category_name)):
+                    brand_word = cleaned_name.replace('সিমেন্ট', '').strip().lower()
+                    if brand_word and brand_word in p_name_norm:
+                        return prod
 
         elif category_head == 'রড':
             brand_matched = True
