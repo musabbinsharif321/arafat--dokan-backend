@@ -36,7 +36,7 @@ class Party(models.Model):
     email = models.EmailField(blank=True, null=True)
     country = models.CharField(max_length=100, default='বাংলাদেশ')
     division = models.CharField(max_length=100, default='ঢাকা')
-    district = models.CharField(max_length=100, default='ঢাকা')
+    district = models.CharField(max_length=100, default='গোপালগঞ্জ')
     thana = models.CharField(max_length=100, blank=True, null=True)
     address = models.TextField(blank=True, default='')
     postcode = models.CharField(max_length=20, blank=True, null=True)

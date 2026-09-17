@@ -78,7 +78,29 @@ def recalculate_party_balances(party):
     elif is_engineer:
         payments_agg = Transaction.objects.filter(party=party, transaction_type__in=['payment_out', 'payment_in', 'payment', 'expense']).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
         payments_tot = (payments_agg['p'] or Decimal('0.00')) + (payments_agg['d'] or Decimal('0.00'))
-        net_balance = (party.opening_balance or Decimal('0.00')) - payments_tot
+        
+        # Calculate sales commission earned by this engineer
+        sales_with_eng = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).filter(notes__contains=str(party.id))
+        total_comm = Decimal('0.00')
+        for s in sales_with_eng:
+            if s.notes and s.notes.strip().startswith('{'):
+                try:
+                    meta = json.loads(s.notes.split('\n')[0])
+                    eng_id = meta.get('engineerId') or meta.get('selectedEngineerId')
+                    if str(eng_id) == str(party.id):
+                        comm = Decimal(str(meta.get('engineerTotalCommission') or 0))
+                        if comm == 0:
+                            r_kg = Decimal(str(meta.get('engineerRodKg') or 0))
+                            r_rate = Decimal(str(meta.get('engineerRodRate') or 0))
+                            c_bag = Decimal(str(meta.get('engineerCementBags') or 0))
+                            c_rate = Decimal(str(meta.get('engineerCementRate') or 0))
+                            comm = (r_kg * r_rate) + (c_bag * c_rate)
+                        total_comm += comm
+                except Exception:
+                    pass
+
+        net_balance = (party.opening_balance or Decimal('0.00')) + total_comm - payments_tot
+        party.total_sales = total_comm
     else:
         sales_tot = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
         sales_paid = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
@@ -588,6 +610,19 @@ class TransactionSerializer(serializers.ModelSerializer):
         if party and is_active:
             recalculate_party_balances(party)
 
+        # Trigger engineer balance recalculation if tagged in notes
+        if is_active and transaction.notes and transaction.notes.strip().startswith('{'):
+            try:
+                import json
+                meta_val = json.loads(transaction.notes.split('\n')[0])
+                eng_id_val = meta_val.get('engineerId') or meta_val.get('selectedEngineerId')
+                if eng_id_val:
+                    eng_obj = Party.objects.filter(id=int(eng_id_val), party_type='engineer').first()
+                    if eng_obj:
+                        recalculate_party_balances(eng_obj)
+            except Exception:
+                pass
+
         # Chronologically recalculate stock & weighted cost for all affected products
         if is_active:
             for pid in affected_product_ids:
@@ -673,6 +708,20 @@ class TransactionSerializer(serializers.ModelSerializer):
                 new_party = Party.objects.filter(id=instance.party_id).first()
                 if new_party:
                     recalculate_party_balances(new_party)
+
+            # Trigger engineer balance recalculation for affected engineers
+            for n_source in [instance.notes]:
+                if n_source and n_source.strip().startswith('{'):
+                    try:
+                        import json
+                        meta_val = json.loads(n_source.split('\n')[0])
+                        eng_id_val = meta_val.get('engineerId') or meta_val.get('selectedEngineerId')
+                        if eng_id_val:
+                            eng_obj = Party.objects.filter(id=int(eng_id_val), party_type='engineer').first()
+                            if eng_obj:
+                                recalculate_party_balances(eng_obj)
+                    except Exception:
+                        pass
 
         # 6. Chronologically recalculate stock & weighted cost for all affected products only if active
         if old_is_active or new_is_active:
