@@ -244,6 +244,7 @@ class UserProfile(models.Model):
     ROLE_CHOICES = [
         ('developer', 'ডেভেলপার (Developer - Full Access & Invoice Edit/Delete)'),
         ('admin', 'অ্যাডমিন (Admin - All Operations Except Invoice Edit/Delete)'),
+        ('manager', 'ম্যানেজার (Manager - Sales, Purchases & Transactions)'),
         ('staff', 'স্টাফ (Staff - View Only)'),
     ]
 
@@ -264,6 +265,8 @@ class UserProfile(models.Model):
             return '🛠️ ডেভেলপার (সর্বোচ্চ ক্ষমতা)'
         elif self.role == 'admin':
             return '👑 অ্যাডমিন (ইনভয়েস এডিট/ডিলিট ব্যতীত সব ক্ষমতা)'
+        elif self.role == 'manager':
+            return '💼 ম্যানেজার (বিক্রয় ও লেনদেন এন্ট্রি ক্ষমতা)'
         elif self.role == 'staff':
             return '👔 স্টাফ (শুধুমাত্র দেখার অনুমতি)'
         return self.role

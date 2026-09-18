@@ -1123,12 +1123,12 @@ class LoginView(APIView):
         password = to_en_digits(raw_pass)
 
         if not identifier or not raw_pass:
-            return Response({'detail': 'ইমেইল/ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন।'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': 'আপনার অনুমোদিত জিমেইল (Gmail) এবং পাসওয়ার্ড প্রদান করুন।'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 1. Lookup by Email
+        # 1. Lookup by Email / Gmail
         user = User.objects.filter(email__iexact=identifier).first() or User.objects.filter(email__iexact=raw_id).first()
 
-        # 2. Lookup by Username
+        # 2. Lookup by Username (backward compatibility)
         if not user:
             user = User.objects.filter(username__iexact=identifier).first() or User.objects.filter(username__iexact=raw_id).first()
 
@@ -1138,19 +1138,31 @@ class LoginView(APIView):
             if profile:
                 user = profile.user
 
-        if user and (user.check_password(raw_pass) or user.check_password(password)):
-            if not user.is_active:
-                return Response({'detail': 'আপনার একাউন্টটি নিষ্ক্রিয় করা আছে। এডমিনের সাথে যোগাযোগ করুন।'}, status=status.HTTP_403_FORBIDDEN)
-
-            token, _ = Token.objects.get_or_create(user=user)
-            serializer = UserSerializer(user)
+        # If user does not exist or has no access in the system
+        if not user:
             return Response({
-                'token': token.key,
-                'user': serializer.data,
-                'message': 'সফলভাবে লগইন হয়েছে।'
-            }, status=status.HTTP_200_OK)
+                'detail': 'এই জিমেইল অ্যাকাউন্টে প্রবেশের কোনো অনুমতি (অ্যাক্সেস) দেওয়া হয়নি। অনুগ্রহ করে অ্যাডমিনের সাথে যোগাযোগ করে অ্যাক্সেস নিন।'
+            }, status=status.HTTP_403_FORBIDDEN)
 
-        return Response({'detail': 'ভুল ইমেইল/ইউজারনেম অথবা পাসওয়ার্ড! সঠিক তথ্য দিন।'}, status=status.HTTP_401_UNAUTHORIZED)
+        # If user account is deactivated / access revoked
+        if not user.is_active or (hasattr(user, 'profile') and user.profile and not user.profile.is_active):
+            return Response({
+                'detail': 'আপনার জিমেইল অ্যাকাউন্টটির অ্যাক্সেস বন্ধ/নিষ্ক্রিয় করা হয়েছে। অ্যাডমিনের সাথে যোগাযোগ করুন।'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Check password correctness
+        if not (user.check_password(raw_pass) or user.check_password(password)):
+            return Response({
+                'detail': 'পাসওয়ার্ড ভুল হয়েছে! সঠিক পাসওয়ার্ড দিন।'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        token, _ = Token.objects.get_or_create(user=user)
+        serializer = UserSerializer(user)
+        return Response({
+            'token': token.key,
+            'user': serializer.data,
+            'message': 'সফলভাবে লগইন হয়েছে।'
+        }, status=status.HTTP_200_OK)
 
 
 class MeView(APIView):
@@ -1176,25 +1188,46 @@ class LogoutView(APIView):
 
 class UserManagementViewSet(viewsets.ModelViewSet):
     """
-    Admin-only endpoint for managing Dokan ERP users (Admin, Staff, Viewer).
+    Admin-only endpoint for managing Dokan ERP users (Admin, Manager, Staff, Developer).
+    Allows giving Gmail access, revoking access (is_active), and assigning specific roles.
     """
     queryset = User.objects.all().order_by('-date_joined')
     serializer_class = UserSerializer
     permission_classes = [IsAdminUserOnly]
 
     def create(self, request, *args, **kwargs):
+        email = request.data.get('email', '').strip().lower()
         username = request.data.get('username', '').strip()
         password = request.data.get('password', '').strip()
         role = request.data.get('role', 'staff').strip()
         full_name = request.data.get('full_name', '').strip()
         phone = request.data.get('phone', '').strip()
-        email = request.data.get('email', '').strip()
+        is_active = request.data.get('is_active', True)
 
-        if not username or not password:
-            return Response({'detail': 'ইউজারনেম এবং পাসওয়ার্ড প্রদান করা আবশ্যক।'}, status=status.HTTP_400_BAD_REQUEST)
+        if isinstance(is_active, str):
+            is_active = is_active.lower() in ('true', '1', 'yes')
+
+        if not password:
+            return Response({'detail': 'পাসওয়ার্ড প্রদান করা আবশ্যক।'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not email and not username:
+            return Response({'detail': 'অনুমোদিত জিমেইল (Gmail) অথবা ইউজারনেম দিন।'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check unique email
+        if email and User.objects.filter(email__iexact=email).exists():
+            return Response({'detail': f"'{email}' জিমেইলটি ইতিমধ্যে সিস্টেমে তালিকাভুক্ত রয়েছে।"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Auto-generate username from email if not provided
+        if not username and email:
+            base_username = email.split('@')[0].replace('.', '_').replace('-', '_')
+            username = base_username
+            counter = 1
+            while User.objects.filter(username__iexact=username).exists():
+                username = f"{base_username}_{counter}"
+                counter += 1
 
         if User.objects.filter(username__iexact=username).exists():
-            return Response({'detail': f"'{username}' ইউজারনেম ইতিমধ্যে ব্যবহার করা হয়েছে। অন্য ইউজারনেম দিন।"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': f"'{username}' ইউজারনেম ইতিমধ্যে ব্যবহার করা হয়েছে। অন্য নাম দিন।"}, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.create_user(
             username=username,
@@ -1202,23 +1235,24 @@ class UserManagementViewSet(viewsets.ModelViewSet):
             email=email,
             first_name=full_name
         )
+        user.is_active = bool(is_active)
+
         if role == 'developer':
             user.is_staff = True
             user.is_superuser = True
-            user.save()
         elif role == 'admin':
             user.is_staff = True
             user.is_superuser = False
-            user.save()
         else:
             user.is_staff = False
             user.is_superuser = False
-            user.save()
+        user.save()
 
         profile, _ = UserProfile.objects.get_or_create(user=user)
         profile.role = role
         profile.full_name = full_name
         profile.phone = phone
+        profile.is_active = bool(is_active)
         profile.save()
 
         return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
@@ -1230,15 +1264,24 @@ class UserManagementViewSet(viewsets.ModelViewSet):
         phone = request.data.get('phone')
         password = request.data.get('password')
         email = request.data.get('email')
+        is_active = request.data.get('is_active')
 
-        if password:
-            user.set_password(password)
+        if password and str(password).strip():
+            user.set_password(str(password).strip())
 
         if email is not None:
+            email = email.strip().lower()
+            if email and User.objects.filter(email__iexact=email).exclude(id=user.id).exists():
+                return Response({'detail': f"'{email}' জিমেইলটি ইতিমধ্যে অন্য ব্যবহারকারীর জন্য ব্যবহৃত হয়েছে।"}, status=status.HTTP_400_BAD_REQUEST)
             user.email = email
 
-        if full_name:
-            user.first_name = full_name
+        if full_name is not None:
+            user.first_name = full_name.strip()
+
+        if is_active is not None:
+            if isinstance(is_active, str):
+                is_active = is_active.lower() in ('true', '1', 'yes')
+            user.is_active = bool(is_active)
 
         if role:
             if role == 'developer':
@@ -1247,6 +1290,9 @@ class UserManagementViewSet(viewsets.ModelViewSet):
             elif role == 'admin':
                 user.is_superuser = False
                 user.is_staff = True
+            elif role == 'manager':
+                user.is_superuser = False
+                user.is_staff = False
             else:
                 user.is_superuser = False
                 user.is_staff = False
@@ -1256,9 +1302,11 @@ class UserManagementViewSet(viewsets.ModelViewSet):
         if role:
             profile.role = role
         if full_name is not None:
-            profile.full_name = full_name
+            profile.full_name = full_name.strip()
         if phone is not None:
-            profile.phone = phone
+            profile.phone = phone.strip()
+        if is_active is not None:
+            profile.is_active = bool(is_active)
         profile.save()
 
         return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
@@ -1268,7 +1316,7 @@ class UserManagementViewSet(viewsets.ModelViewSet):
         if user == request.user:
             return Response({'detail': 'আপনি নিজের এডমিন একাউন্ট ডিলিট করতে পারবেন না।'}, status=status.HTTP_400_BAD_REQUEST)
         user.delete()
-        return Response({'detail': 'ইউজার সফলভাবে মুছে ফেলা হয়েছে।'}, status=status.HTTP_204_NO_CONTENT)
+        return Response({'detail': 'ব্যবহারকারী সফলভাবে মুছে ফেলা হয়েছে।'}, status=status.HTTP_204_NO_CONTENT)
 
 
 
