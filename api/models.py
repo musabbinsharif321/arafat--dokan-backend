@@ -130,6 +130,7 @@ class Transaction(models.Model):
         ('purchase_return', 'Purchase Return'),
         ('payment_in', 'Payment In'),
         ('payment_out', 'Payment Out'),
+        ('loan_in', 'Loan In / লোন গ্রহণ'),
     ]
 
     PAYMENT_METHODS = [

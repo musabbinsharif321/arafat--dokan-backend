@@ -199,7 +199,8 @@ def generate_product_cost_log(product_or_id):
             'sale_return': 'বিক্রয় ফেরত (Sale Return)',
             'purchase_return': 'ক্রয় ফেরত (Purchase Return)',
             'payment_in': 'পেমেন্ট গ্রহণ',
-            'payment_out': 'পেমেন্ট প্রদান'
+            'payment_out': 'পেমেন্ট প্রদান',
+            'loan_in': 'লোন গ্রহণ'
         }
 
         # Check if transaction was edited/updated after its creation

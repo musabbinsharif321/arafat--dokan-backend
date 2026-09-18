@@ -61,8 +61,10 @@ def recalculate_party_balances(party):
             if p_tx.notes and p_tx.notes.strip().startswith('{'):
                 try:
                     meta = json.loads(p_tx.notes.split('\n')[0])
-                    ship = Decimal(str(meta.get('shippingCost') or meta.get('shipping_cost') or meta.get('transportCost') or 0))
-                    lab = Decimal(str(meta.get('laborCost') or meta.get('labor_cost') or 0))
+                    ship_payer = meta.get('shippingPayer', 'shop')
+                    labor_payer = meta.get('laborPayer', 'shop')
+                    ship = Decimal(str(meta.get('shippingCost') or meta.get('shipping_cost') or meta.get('transportCost') or 0)) if ship_payer != 'supplier' else Decimal('0.00')
+                    lab = Decimal(str(meta.get('laborCost') or meta.get('labor_cost') or 0)) if labor_payer != 'supplier' else Decimal('0.00')
                     amt = max(Decimal('0.00'), amt - (ship + lab))
                 except Exception:
                     pass
@@ -72,8 +74,9 @@ def recalculate_party_balances(party):
         payments_agg = Transaction.objects.filter(party=party, transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
         payments_tot = (payments_agg['p'] or Decimal('0.00')) + (payments_agg['d'] or Decimal('0.00'))
         returns_tot = Transaction.objects.filter(party=party, transaction_type='purchase_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(r=Sum('total_amount'))['r'] or Decimal('0.00')
+        loans_tot = Transaction.objects.filter(party=party, transaction_type='loan_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
         
-        net_balance = (party.opening_balance or Decimal('0.00')) + purchases_tot - purchases_paid - payments_tot - returns_tot
+        net_balance = (party.opening_balance or Decimal('0.00')) + purchases_tot + loans_tot - purchases_paid - payments_tot - returns_tot
         party.total_purchases = purchases_tot
     elif is_engineer:
         payments_agg = Transaction.objects.filter(party=party, transaction_type__in=['payment_out', 'payment_in', 'payment', 'expense']).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
@@ -379,7 +382,7 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
 
     sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     purchases_qs = Transaction.objects.filter(transaction_type='purchase').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
-    p_in_qs = Transaction.objects.filter(transaction_type='payment_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
+    p_in_qs = Transaction.objects.filter(transaction_type__in=['payment_in', 'loan_in']).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     p_out_qs = Transaction.objects.filter(transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     exp_qs = Expense.objects.all()
 
@@ -432,8 +435,10 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
     for p in purchases_qs.filter(notes__startswith='{'):
         try:
             meta_p = json.loads(p.notes.split('\n')[0])
-            s_p = Decimal(str(meta_p.get('shippingPaidAmount') or (meta_p.get('shippingCost') if meta_p.get('shippingStatus') == 'paid' else 0) or 0))
-            l_p = Decimal(str(meta_p.get('laborPaidAmount') or (meta_p.get('laborCost') if meta_p.get('laborStatus') == 'paid' else 0) or 0))
+            s_payer = meta_p.get('shippingPayer', 'shop')
+            l_payer = meta_p.get('laborPayer', 'shop')
+            s_p = Decimal(str(meta_p.get('shippingPaidAmount') or (meta_p.get('shippingCost') if meta_p.get('shippingStatus') == 'paid' else 0) or 0)) if s_payer != 'supplier' else Decimal('0.00')
+            l_p = Decimal(str(meta_p.get('laborPaidAmount') or (meta_p.get('laborCost') if meta_p.get('laborStatus') == 'paid' else 0) or 0)) if l_payer != 'supplier' else Decimal('0.00')
             extra_purchase_cash_out += (s_p + l_p)
         except Exception:
             pass
@@ -519,9 +524,11 @@ class TransactionSerializer(serializers.ModelSerializer):
             is_bank_to_bank = 'banktobank' in pay_method or meta.get('paymentMethodName') == 'BankToBank' or 'bank_to_bank' in str(meta).lower()
             is_cheque = any(c in pay_method for c in ['cheque', 'check']) or meta.get('paymentMethodName') == 'Cheque'
 
-            # Calculate additional cash paid for shipping and labor
-            ship_paid = Decimal(str(meta.get('shippingPaidAmount') or (meta.get('shippingCost') if meta.get('shippingStatus') == 'paid' else 0) or 0))
-            lab_paid = Decimal(str(meta.get('laborPaidAmount') or (meta.get('laborCost') if meta.get('laborStatus') == 'paid' else 0) or 0))
+            # Calculate additional cash paid for shipping and labor (only when paid directly by shop)
+            ship_payer = meta.get('shippingPayer', 'shop')
+            labor_payer = meta.get('laborPayer', 'shop')
+            ship_paid = Decimal(str(meta.get('shippingPaidAmount') or (meta.get('shippingCost') if meta.get('shippingStatus') == 'paid' else 0) or 0)) if ship_payer != 'supplier' else Decimal('0.00')
+            lab_paid = Decimal(str(meta.get('laborPaidAmount') or (meta.get('laborCost') if meta.get('laborStatus') == 'paid' else 0) or 0)) if labor_payer != 'supplier' else Decimal('0.00')
             extra_cash_expenses = ship_paid + lab_paid
 
             if is_bank_to_bank or is_cheque:
