@@ -10,6 +10,7 @@ class ShopSettings(models.Model):
     currency = models.CharField(max_length=20, default='৳')
     logo_url = models.TextField(blank=True, null=True)
     receipt_footer = models.TextField(blank=True, default='ধন্যবাদ, আবার আসবেন!')
+    commission_pin = models.CharField(max_length=100, blank=True, null=True, default='1234')
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -252,6 +253,7 @@ class UserProfile(models.Model):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='staff')
     full_name = models.CharField(max_length=255, blank=True, null=True)
     phone = models.CharField(max_length=50, blank=True, null=True)
+    avatar = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

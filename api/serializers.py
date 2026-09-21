@@ -840,7 +840,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserProfile
-        fields = ['id', 'role', 'role_display', 'role_badge', 'full_name', 'phone', 'is_active', 'created_at']
+        fields = ['id', 'role', 'role_display', 'role_badge', 'full_name', 'phone', 'avatar', 'is_active', 'created_at']
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -850,10 +850,11 @@ class UserSerializer(serializers.ModelSerializer):
     role_badge = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
     phone = serializers.SerializerMethodField()
+    avatar = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'profile', 'role', 'role_display', 'role_badge', 'full_name', 'phone', 'date_joined']
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'profile', 'role', 'role_display', 'role_badge', 'full_name', 'phone', 'avatar', 'date_joined']
 
     def get_role(self, obj):
         if hasattr(obj, 'profile') and obj.profile and obj.profile.role:
@@ -881,6 +882,11 @@ class UserSerializer(serializers.ModelSerializer):
     def get_phone(self, obj):
         if hasattr(obj, 'profile') and obj.profile:
             return obj.profile.phone or ''
+        return ''
+
+    def get_avatar(self, obj):
+        if hasattr(obj, 'profile') and obj.profile:
+            return obj.profile.avatar or ''
         return ''
 
 

@@ -50,11 +50,22 @@ class RoleBasedAccessPermission(permissions.BasePermission):
             is_transaction = 'transaction' in str(view_name).lower() or getattr(view, 'is_transaction_view', False)
 
             if is_transaction:
-                # Admin can view (GET) and create (POST) invoices
+                # Admin can view (GET) and create (POST) invoices / transactions
                 if request.method in permissions.SAFE_METHODS or request.method == 'POST':
                     return True
-                # Admin CANNOT update or delete any invoice
-                raise PermissionDenied('ইনভয়েস বা লেনদেন সম্পাদনা (Edit) অথবা মুছে ফেলার (Delete) অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।')
+
+                # Admin CANNOT delete any invoice or transaction (Developer only)
+                if request.method == 'DELETE':
+                    raise PermissionDenied('ইনভয়েস বা লেনদেন মুছে ফেলার (Delete) অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।')
+
+                # For PUT / PATCH:
+                # Admin CANNOT edit core invoice fields (items, total_amount, subtotal, party, party_id, transaction_type, discount).
+                # Admin CAN update notes (settling labor/loading charges, delivery remarks) and status.
+                forbidden_edit_fields = {'items', 'total_amount', 'subtotal', 'party', 'party_id', 'transaction_type', 'discount'}
+                if isinstance(request.data, dict) and any(k in request.data for k in forbidden_edit_fields):
+                    raise PermissionDenied('ইনভয়েস বা লেনদেনের পণ্য তালিকা, মোট টাকা বা খরিদ্দার সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।')
+
+                return True
 
             # For all other resources, Admin has full access
             return True
@@ -85,7 +96,14 @@ class RoleBasedAccessPermission(permissions.BasePermission):
                     return True
                 if action == 'approve' and request.method == 'POST':
                     return True
-                raise PermissionDenied('ইনভয়েস বা লেনদেন সম্পাদনা (Edit) অথবা মুছে ফেলার (Delete) অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।')
+                if request.method == 'DELETE':
+                    raise PermissionDenied('ইনভয়েস বা লেনদেন মুছে ফেলার (Delete) অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।')
+
+                forbidden_edit_fields = {'items', 'total_amount', 'subtotal', 'party', 'party_id', 'transaction_type', 'discount'}
+                if isinstance(request.data, dict) and any(k in request.data for k in forbidden_edit_fields):
+                    raise PermissionDenied('ইনভয়েস বা লেনদেনের পণ্য তালিকা, মোট টাকা বা খরিদ্দার সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।')
+
+                return True
 
             return True
 

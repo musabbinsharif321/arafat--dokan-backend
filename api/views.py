@@ -876,13 +876,21 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         role = get_user_role(request.user)
-        if role != 'developer':
+        if role == 'admin':
+            forbidden_edit_fields = {'items', 'total_amount', 'subtotal', 'party', 'party_id', 'transaction_type', 'discount'}
+            if isinstance(request.data, dict) and any(k in request.data for k in forbidden_edit_fields):
+                return Response({'detail': 'ইনভয়েস বা লেনদেনের পণ্য তালিকা, মোট টাকা বা খরিদ্দার সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
+        elif role != 'developer':
             return Response({'detail': 'ইনভয়েস বা লেনদেন সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         role = get_user_role(request.user)
-        if role != 'developer':
+        if role == 'admin':
+            forbidden_edit_fields = {'items', 'total_amount', 'subtotal', 'party', 'party_id', 'transaction_type', 'discount'}
+            if isinstance(request.data, dict) and any(k in request.data for k in forbidden_edit_fields):
+                return Response({'detail': 'ইনভয়েস বা লেনদেনের পণ্য তালিকা, মোট টাকা বা খরিদ্দার সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
+        elif role != 'developer':
             return Response({'detail': 'ইনভয়েস বা লেনদেন সম্পাদনা (Edit) করার অনুমতি শুধুমাত্র ডেভেলপার (Developer) এর রয়েছে।'}, status=status.HTTP_403_FORBIDDEN)
         return super().partial_update(request, *args, **kwargs)
 
@@ -1172,6 +1180,42 @@ class MeView(APIView):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
 
+    def patch(self, request):
+        user = request.user
+        full_name = request.data.get('full_name')
+        phone = request.data.get('phone')
+        email = request.data.get('email')
+        password = request.data.get('password')
+        avatar = request.data.get('avatar')
+
+        if password and str(password).strip():
+            user.set_password(str(password).strip())
+
+        if email is not None:
+            clean_email = str(email).strip().lower()
+            if clean_email and User.objects.filter(email__iexact=clean_email).exclude(id=user.id).exists():
+                return Response({'detail': f"'{clean_email}' জিমেইলটি ইতিমধ্যে অন্য একাউন্টে ব্যবহৃত হচ্ছে।"}, status=status.HTTP_400_BAD_REQUEST)
+            user.email = clean_email
+
+        if full_name is not None:
+            user.first_name = str(full_name).strip()
+
+        user.save()
+
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        if full_name is not None:
+            profile.full_name = str(full_name).strip()
+        if phone is not None:
+            profile.phone = str(phone).strip()
+        if avatar is not None:
+            profile.avatar = avatar
+        profile.save()
+
+        return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
+
+    def put(self, request):
+        return self.patch(request)
+
 
 class LogoutView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -1252,6 +1296,9 @@ class UserManagementViewSet(viewsets.ModelViewSet):
         profile.role = role
         profile.full_name = full_name
         profile.phone = phone
+        avatar = request.data.get('avatar')
+        if avatar is not None:
+            profile.avatar = avatar
         profile.is_active = bool(is_active)
         profile.save()
 
@@ -1265,6 +1312,7 @@ class UserManagementViewSet(viewsets.ModelViewSet):
         password = request.data.get('password')
         email = request.data.get('email')
         is_active = request.data.get('is_active')
+        avatar = request.data.get('avatar')
 
         if password and str(password).strip():
             user.set_password(str(password).strip())
@@ -1305,6 +1353,8 @@ class UserManagementViewSet(viewsets.ModelViewSet):
             profile.full_name = full_name.strip()
         if phone is not None:
             profile.phone = phone.strip()
+        if avatar is not None:
+            profile.avatar = avatar
         if is_active is not None:
             profile.is_active = bool(is_active)
         profile.save()
