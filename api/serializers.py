@@ -73,10 +73,13 @@ def recalculate_party_balances(party):
         purchases_paid = purchases.aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
         payments_agg = Transaction.objects.filter(party=party, transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
         payments_tot = (payments_agg['p'] or Decimal('0.00')) + (payments_agg['d'] or Decimal('0.00'))
-        returns_tot = Transaction.objects.filter(party=party, transaction_type='purchase_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(r=Sum('total_amount'))['r'] or Decimal('0.00')
+        returns_agg = Transaction.objects.filter(party=party, transaction_type='purchase_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(r=Sum('total_amount'), p=Sum('paid_amount'))
+        returns_tot = returns_agg['r'] or Decimal('0.00')
+        returns_refund_received = returns_agg['p'] or Decimal('0.00')
+        net_purchase_returns = returns_tot - returns_refund_received
         loans_tot = Transaction.objects.filter(party=party, transaction_type='loan_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(s=Sum('total_amount'))['s'] or Decimal('0.00')
         
-        net_balance = (party.opening_balance or Decimal('0.00')) + purchases_tot + loans_tot - purchases_paid - payments_tot - returns_tot
+        net_balance = (party.opening_balance or Decimal('0.00')) + purchases_tot + loans_tot - purchases_paid - payments_tot - net_purchase_returns
         party.total_purchases = purchases_tot
     elif is_engineer:
         payments_agg = Transaction.objects.filter(party=party, transaction_type__in=['payment_out', 'payment_in', 'payment', 'expense']).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
@@ -109,9 +112,13 @@ def recalculate_party_balances(party):
         sales_paid = Transaction.objects.filter(party=party, transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
         payments_agg = Transaction.objects.filter(party=party, transaction_type='payment_in').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'), d=Sum('discount'))
         payments_tot = (payments_agg['p'] or Decimal('0.00')) + (payments_agg['d'] or Decimal('0.00'))
-        returns_tot = Transaction.objects.filter(party=party, transaction_type='sale_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(r=Sum('total_amount'))['r'] or Decimal('0.00')
+        payments_out_agg = Transaction.objects.filter(party=party, transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(p=Sum('paid_amount'))['p'] or Decimal('0.00')
+        returns_agg = Transaction.objects.filter(party=party, transaction_type='sale_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).aggregate(r=Sum('total_amount'), p=Sum('paid_amount'))
+        returns_tot = returns_agg['r'] or Decimal('0.00')
+        returns_refund_paid = returns_agg['p'] or Decimal('0.00')
+        net_returns_adjusted = returns_tot - returns_refund_paid
         
-        net_balance = (party.opening_balance or Decimal('0.00')) + sales_tot - sales_paid - payments_tot - returns_tot
+        net_balance = (party.opening_balance or Decimal('0.00')) + sales_tot - sales_paid - payments_tot + payments_out_agg - net_returns_adjusted
         party.total_sales = sales_tot
 
     if net_balance >= Decimal('0.00'):
@@ -382,6 +389,7 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
 
     sales_qs = Transaction.objects.filter(transaction_type='sale').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     purchases_qs = Transaction.objects.filter(transaction_type='purchase').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
+    sale_returns_qs = Transaction.objects.filter(transaction_type='sale_return').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     p_in_qs = Transaction.objects.filter(transaction_type__in=['payment_in', 'loan_in']).exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     p_out_qs = Transaction.objects.filter(transaction_type='payment_out').exclude(status__in=['pending', 'draft', 'cancelled', 'rejected']).exclude(notes__contains='isHistoricalLedger')
     exp_qs = Expense.objects.all()
@@ -389,6 +397,7 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
     if exclude_tx_id:
         sales_qs = sales_qs.exclude(id=exclude_tx_id)
         purchases_qs = purchases_qs.exclude(id=exclude_tx_id)
+        sale_returns_qs = sale_returns_qs.exclude(id=exclude_tx_id)
         p_in_qs = p_in_qs.exclude(id=exclude_tx_id)
         p_out_qs = p_out_qs.exclude(id=exclude_tx_id)
 
@@ -472,8 +481,13 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
     filtered_p_in_qs = p_in_qs
     filtered_exp_qs = exp_qs
 
+    # Sale return cash & bank refund payments made to customers
+    sale_return_cash_out = sale_returns_qs.filter(payment_method__in=cash_methods).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')
+    sale_return_bank_out = sale_returns_qs.filter(payment_method__in=bank_methods).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')
+
     cash_out = (
         (purchases_qs.filter(payment_method__in=cash_methods).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
+        sale_return_cash_out +
         extra_purchase_cash_out +
         extra_sales_cash_out +
         (filtered_p_out_qs.filter(payment_method__in=cash_methods).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
@@ -485,6 +499,7 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
     bank_p_out_qs = filtered_p_out_qs.exclude(notes__contains='isTransfer').exclude(notes__contains='ব্যালেন্স ট্রান্সফার').exclude(party_name__contains='➔')
     bank_out = (
         (purchases_qs.filter(payment_method__in=bank_methods).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
+        sale_return_bank_out +
         (bank_p_out_qs.filter(payment_method__in=bank_methods).aggregate(tot=Sum('paid_amount'))['tot'] or Decimal('0.00')) +
         (filtered_exp_qs.filter(payment_method__in=bank_methods).aggregate(tot=Sum('amount'))['tot'] or Decimal('0.00'))
     )
@@ -521,8 +536,8 @@ class TransactionSerializer(serializers.ModelSerializer):
         pay_method = (attrs.get('payment_method') or (self.instance.payment_method if self.instance else 'cash') or 'cash').lower()
         curr_status = attrs.get('status') or (self.instance.status if self.instance else 'pending')
 
-        # Enforce balance check on money outflows (purchase or payment_out) only when active/approved
-        if tx_type in ['purchase', 'payment_out'] and curr_status not in ['pending', 'draft', 'cancelled', 'rejected']:
+        # Enforce balance check on money outflows (purchase, payment_out, or sale_return) only when active/approved
+        if tx_type in ['purchase', 'payment_out', 'sale_return'] and curr_status not in ['pending', 'draft', 'cancelled', 'rejected']:
             exclude_id = self.instance.id if self.instance else None
             cash_bal, bank_bal = get_available_balances(exclude_tx_id=exclude_id)
             
