@@ -132,7 +132,9 @@ def generate_product_cost_log(product_or_id):
             'stock_after': float(product.opening_stock),
             'cost_before': 0.0,
             'cost_after': float(product.purchase_price or 0.0),
-            'formula': f"প্রারম্ভিক মজুদ: {float(product.opening_stock)} {product.unit}"
+            'formula': f"প্রারম্ভিক মজুদ: {float(product.opening_stock)} {product.unit}",
+            'is_edited': False,
+            'edited_at': '',
         })
 
     for idx, item in enumerate(items_list):
@@ -248,8 +250,8 @@ def generate_product_cost_log(product_or_id):
             'formula': formula
         })
 
-    has_recalculations = any(l['is_edited'] for l in logs)
-    latest_recalc_date = max([l['edited_at'] for l in logs if l['is_edited']], default="")
+    has_recalculations = any(l.get('is_edited', False) for l in logs)
+    latest_recalc_date = max([l.get('edited_at', '') for l in logs if l.get('is_edited', False)], default="")
 
     return {
         'product_id': product.id,

@@ -10,9 +10,11 @@ python manage.py collectstatic --noinput
 
 # 2. Run database migrations
 python manage.py migrate
-
-
-
+# 3. Start automated Google Drive backup scheduler in background (if configured)
+if [ "$ENABLE_AUTO_BACKUP" = "true" ] || [ -n "$GDRIVE_FOLDER_ID" ]; then
+    echo "Starting automated Google Drive backup scheduler in background..."
+    python manage.py run_backup_scheduler &
+fi
 # 4. Start production Gunicorn WSGI server
 exec gunicorn dokan_backend.wsgi:application \
     --bind "0.0.0.0:$PORT" \
