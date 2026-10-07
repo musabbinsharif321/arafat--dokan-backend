@@ -464,9 +464,12 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
             pass
 
     # Calculate extra cement loading paid in cash from active sales
+    # (Skip if already recorded in Expense table to prevent double-counting)
     extra_sales_cash_out = Decimal('0.00')
     for s in sales_qs.filter(notes__startswith='{'):
         try:
+            if s.invoice_no and s.invoice_no in covered_invoices:
+                continue
             meta_s = json.loads(s.notes.split('\n')[0])
             c_p = Decimal(str(meta_s.get('cementLoadingPaidAmount') or (meta_s.get('cementLaborCost') if meta_s.get('cementLoadingPaid') else 0) or 0))
             extra_sales_cash_out += c_p
