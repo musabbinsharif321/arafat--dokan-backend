@@ -946,6 +946,32 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     serializer_class = ExpenseSerializer
     permission_classes = [RoleBasedAccessPermission]
 
+    def create(self, request, *args, **kwargs):
+        title = (request.data.get('title') or '').strip()
+        date = request.data.get('date')
+        amount = request.data.get('amount')
+
+        # 1. Prevent duplicate loading/unloading or invoice-linked expenses
+        if title and 'চালান #' in title:
+            existing = Expense.objects.filter(title=title).order_by('-id').first()
+            if existing:
+                serializer = self.get_serializer(existing)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+        # 2. Prevent rapid duplicate submissions within 60 seconds
+        if title and amount:
+            one_min_ago = timezone.now() - timedelta(seconds=60)
+            dup = Expense.objects.filter(
+                title=title,
+                amount=amount,
+                created_at__gte=one_min_ago
+            ).first()
+            if dup:
+                serializer = self.get_serializer(dup)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+        return super().create(request, *args, **kwargs)
+
     def get_queryset(self):
         qs = super().get_queryset()
         category_id = self.request.query_params.get('category')
