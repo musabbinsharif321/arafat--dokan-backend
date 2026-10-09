@@ -440,39 +440,60 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
             cash_in += paid
     
     # Calculate extra shipping and labor paid in cash from active purchases
-    # (Skip if already recorded in Expense table to prevent double-counting)
-    covered_invoices = set()
+    # (Skip each item individually if already recorded in Expense table to prevent double-counting)
+    covered_shipping_invoices = set()
+    covered_labor_invoices = set()
     for e in exp_qs:
-        for text in [e.title or '', e.notes or '']:
-            if 'INV-' in text:
-                import re
-                for inv in re.findall(r'INV-\d{4}-\d+', text):
-                    covered_invoices.add(inv)
+        title = e.title or ''
+        notes = e.notes or ''
+        text = f"{title} {notes}"
+        if 'INV-' in text:
+            import re
+            for inv in re.findall(r'INV-[A-Za-z0-9-]+', text):
+                if 'পরিবহন' in title or 'গাড়ি ভাড়া' in title or 'ভাড়া' in title or 'isShippingExpense' in notes:
+                    covered_shipping_invoices.add(inv)
+                if 'লোডিং' in title or 'আনলোডিং' in title or 'লেবার' in title or 'isLaborExpense' in notes:
+                    covered_labor_invoices.add(inv)
 
     extra_purchase_cash_out = Decimal('0.00')
     for p in purchases_qs.filter(notes__startswith='{'):
         try:
-            if p.invoice_no and p.invoice_no in covered_invoices:
-                continue
             meta_p = json.loads(p.notes.split('\n')[0])
             s_payer = meta_p.get('shippingPayer', 'shop')
             l_payer = meta_p.get('laborPayer', 'shop')
-            s_p = Decimal(str(meta_p.get('shippingPaidAmount') or (meta_p.get('shippingCost') if meta_p.get('shippingStatus') == 'paid' else 0) or 0)) if s_payer != 'supplier' else Decimal('0.00')
-            l_p = Decimal(str(meta_p.get('laborPaidAmount') or (meta_p.get('laborCost') if meta_p.get('laborStatus') == 'paid' else 0) or 0)) if l_payer != 'supplier' else Decimal('0.00')
+            
+            s_p = Decimal('0.00')
+            if s_payer != 'supplier' and (not p.invoice_no or p.invoice_no not in covered_shipping_invoices):
+                s_p = Decimal(str(meta_p.get('shippingPaidAmount') or (meta_p.get('shippingCost') if meta_p.get('shippingStatus') == 'paid' else 0) or 0))
+                
+            l_p = Decimal('0.00')
+            if l_payer != 'supplier' and (not p.invoice_no or p.invoice_no not in covered_labor_invoices):
+                l_p = Decimal(str(meta_p.get('laborPaidAmount') or (meta_p.get('laborCost') if meta_p.get('laborStatus') == 'paid' else 0) or 0))
+                
             extra_purchase_cash_out += (s_p + l_p)
         except Exception:
             pass
 
-    # Calculate extra cement loading paid in cash from active sales
-    # (Skip if already recorded in Expense table to prevent double-counting)
+    covered_invoices = covered_shipping_invoices | covered_labor_invoices
+
+    # Calculate extra sales shipping, rod labor, and cement loading paid in cash from active sales
+    # (Skip each item individually if already recorded in Expense table to prevent double-counting)
     extra_sales_cash_out = Decimal('0.00')
     for s in sales_qs.filter(notes__startswith='{'):
         try:
-            if s.invoice_no and s.invoice_no in covered_invoices:
-                continue
             meta_s = json.loads(s.notes.split('\n')[0])
-            c_p = Decimal(str(meta_s.get('cementLoadingPaidAmount') or (meta_s.get('cementLaborCost') if meta_s.get('cementLoadingPaid') else 0) or 0))
-            extra_sales_cash_out += c_p
+            # Cement loading
+            if not s.invoice_no or s.invoice_no not in covered_labor_invoices:
+                c_p = Decimal(str(meta_s.get('cementLoadingPaidAmount') or (meta_s.get('cementLaborCost') if meta_s.get('cementLoadingPaid') else 0) or 0))
+                extra_sales_cash_out += c_p
+            # Rod labor loading
+            if not s.invoice_no or s.invoice_no not in covered_labor_invoices:
+                r_p = Decimal(str(meta_s.get('rodLaborPaidAmount') or (meta_s.get('rodLaborCost') if meta_s.get('rodLaborPaid') else 0) or 0))
+                extra_sales_cash_out += r_p
+            # Sales shipping
+            if not s.invoice_no or s.invoice_no not in covered_shipping_invoices:
+                sh_p = Decimal(str(meta_s.get('salesShippingPaidAmount') or (meta_s.get('shippingCost') if meta_s.get('salesShippingPaid') else 0) or 0))
+                extra_sales_cash_out += sh_p
         except Exception:
             pass
 
@@ -537,6 +558,8 @@ class TransactionSerializer(serializers.ModelSerializer):
         paid_amt = Decimal(str(paid_amt or 0))
 
         pay_method = (attrs.get('payment_method') or (self.instance.payment_method if self.instance else 'cash') or 'cash').lower()
+        if 'payment_method' in attrs:
+            attrs['payment_method'] = pay_method
         curr_status = attrs.get('status') or (self.instance.status if self.instance else 'pending')
 
         # Enforce balance check on money outflows (purchase, payment_out, or sale_return) only when active/approved
