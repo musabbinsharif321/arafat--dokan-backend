@@ -55,7 +55,7 @@ class ShopSettingsViewSet(viewsets.ModelViewSet):
         return ShopSettings.objects.all()
 
 class PartyViewSet(viewsets.ModelViewSet):
-    queryset = Party.objects.all().order_by('-created_at')
+    queryset = Party.objects.prefetch_related('sites').order_by('-created_at')
     serializer_class = PartySerializer
     permission_classes = [RoleBasedAccessPermission]
 
@@ -700,7 +700,7 @@ def apply_product_custom_ordering(qs):
     ).order_by('cat_order', 'sub_order', 'size_order', 'name')
 
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.all()
+    queryset = Product.objects.select_related('category').all()
     serializer_class = ProductSerializer
     permission_classes = [RoleBasedAccessPermission]
 
@@ -835,7 +835,7 @@ class BankViewSet(viewsets.ModelViewSet):
 from .services import recalculate_product_stock_and_cost
 
 class TransactionViewSet(viewsets.ModelViewSet):
-    queryset = Transaction.objects.all().order_by('-created_at')
+    queryset = Transaction.objects.select_related('party').prefetch_related('items', 'items__product').order_by('-created_at')
     serializer_class = TransactionSerializer
     permission_classes = [RoleBasedAccessPermission]
     is_transaction_view = True
@@ -1101,7 +1101,7 @@ class DashboardStatsView(APIView):
             })
 
         # Recent Transactions
-        recent_txs = Transaction.objects.all().order_by('-created_at')[:10]
+        recent_txs = Transaction.objects.select_related('party').prefetch_related('items', 'items__product').order_by('-created_at')[:10]
         recent_tx_serializer = TransactionSerializer(recent_txs, many=True)
 
         return Response({
