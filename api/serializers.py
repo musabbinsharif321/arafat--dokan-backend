@@ -484,16 +484,19 @@ def get_available_balances(exclude_tx_id=None, exclude_expense_id=None):
             meta_s = json.loads(s.notes.split('\n')[0])
             # Cement loading
             if not s.invoice_no or s.invoice_no not in covered_labor_invoices:
-                c_p = Decimal(str(meta_s.get('cementLoadingPaidAmount') or (meta_s.get('cementLaborCost') if meta_s.get('cementLoadingPaid') else 0) or 0))
-                extra_sales_cash_out += c_p
+                if not meta_s.get('isHistoricalLabor'):
+                    c_p = Decimal(str(meta_s.get('cementLoadingPaidAmount') or (meta_s.get('cementLaborCost') if meta_s.get('cementLoadingPaid') else 0) or 0))
+                    extra_sales_cash_out += c_p
             # Rod labor loading
             if not s.invoice_no or s.invoice_no not in covered_labor_invoices:
-                r_p = Decimal(str(meta_s.get('rodLaborPaidAmount') or (meta_s.get('rodLaborCost') if meta_s.get('rodLaborPaid') else 0) or 0))
-                extra_sales_cash_out += r_p
+                if not meta_s.get('isHistoricalLabor'):
+                    r_p = Decimal(str(meta_s.get('rodLaborPaidAmount') or (meta_s.get('rodLaborCost') if meta_s.get('rodLaborPaid') else 0) or 0))
+                    extra_sales_cash_out += r_p
             # Sales shipping
             if not s.invoice_no or s.invoice_no not in covered_shipping_invoices:
-                sh_p = Decimal(str(meta_s.get('salesShippingPaidAmount') or (meta_s.get('shippingCost') if meta_s.get('salesShippingPaid') else 0) or 0))
-                extra_sales_cash_out += sh_p
+                if not meta_s.get('isHistoricalShipping'):
+                    sh_p = Decimal(str(meta_s.get('salesShippingPaidAmount') or (meta_s.get('shippingCost') if meta_s.get('salesShippingPaid') else 0) or 0))
+                    extra_sales_cash_out += sh_p
         except Exception:
             pass
 
